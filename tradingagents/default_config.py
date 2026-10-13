@@ -79,6 +79,14 @@ def _apply_env_overrides(config: dict) -> dict:
             config[key] = _coerce(raw, config.get(key))
         except ValueError as exc:
             raise ValueError(f"Invalid value for {env_var}: {exc}") from exc
+    # A data category's vendor chain, e.g.
+    # TRADINGAGENTS_VENDOR_NEWS_DATA=alpha_vantage,yfinance (tried in order).
+    vendors = config.get("data_vendors")
+    if isinstance(vendors, dict):
+        for category in list(vendors):
+            raw = os.environ.get(f"TRADINGAGENTS_VENDOR_{category.upper()}", "").strip()
+            if raw:
+                vendors[category] = ",".join(v.strip() for v in raw.split(",") if v.strip())
     return config
 
 

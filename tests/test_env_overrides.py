@@ -137,3 +137,28 @@ def test_unknown_env_var_is_ignored(monkeypatch):
         TRADINGAGENTS_NONEXISTENT_KEY="oops",
     )
     assert "nonexistent_key" not in config
+
+
+@pytest.mark.unit
+def test_a_data_category_vendor_chain_comes_from_the_environment(monkeypatch):
+    from tradingagents.default_config import build_default_config
+
+    monkeypatch.setenv("TRADINGAGENTS_VENDOR_NEWS_DATA", " alpha_vantage , yfinance ")
+    config = build_default_config()
+    assert config["data_vendors"]["news_data"] == "alpha_vantage,yfinance"
+    assert config["data_vendors"]["core_stock_apis"] == "yfinance"     # others untouched
+
+
+@pytest.mark.unit
+def test_the_news_chain_falls_back_to_yahoo_when_alpha_vantage_is_throttled(monkeypatch):
+    from tradingagents.dataflows import router
+    from tradingagents.dataflows.vendors.alpha_vantage.common import AlphaVantageRateLimitError
+
+    def throttled(*a, **k):
+        raise AlphaVantageRateLimitError("25 requests per day")
+
+    monkeypatch.setitem(router.VENDOR_METHODS["get_news"], "alpha_vantage", throttled)
+    monkeypatch.setitem(router.VENDOR_METHODS["get_news"], "yfinance", lambda *a, **k: "YAHOO NEWS")
+    monkeypatch.setattr(router, "get_config",
+                        lambda: {"data_vendors": {"news_data": "alpha_vantage,yfinance"}, "tool_vendors": {}})
+    assert router.route_to_vendor("get_news", "NVDA", "2026-10-01", "2026-10-09") == "YAHOO NEWS"
