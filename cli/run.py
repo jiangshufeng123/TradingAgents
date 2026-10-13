@@ -32,6 +32,8 @@ from tradingagents.graph.analyst_execution import (
 )
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.usage import append_ledger, ledger_row, render_markdown, summarize
+from tradingagents.vote import agreement_label, consensus
+from tradingagents.vote import render_markdown as render_vote
 
 
 def _run_directory(config: dict, ticker: str, trade_date: str) -> Path:
@@ -111,6 +113,7 @@ def run_analysis(checkpoint: bool | None = None, portfolio=None, flags=None):
     selections = get_user_selections(flags)
 
     config = _build_run_config(selections, checkpoint)
+    vote_runs = _vote_runs(flags, config)
 
     stats_handler = StatsCallbackHandler()
 
@@ -350,7 +353,10 @@ def run_analysis(checkpoint: bool | None = None, portfolio=None, flags=None):
             # Clean run: log the decision, then drop this run's checkpoint so a
             # later run starts fresh. A mid-stream failure skips both, keeping
             # the checkpoint for resume.
-            graph.record_decision(selections["ticker"], selections["analysis_date"], final_state)
+            # With several runs voting, the decision logged is the consensus,
+            # recorded once all runs are in.
+            if vote_runs == 1:
+                graph.record_decision(selections["ticker"], selections["analysis_date"], final_state)
             graph.clear_checkpoint_on_success(
                 selections["ticker"], selections["analysis_date"], selections["asset_type"], portfolio
             )
@@ -385,14 +391,77 @@ def run_analysis(checkpoint: bool | None = None, portfolio=None, flags=None):
         )
     console.print(f"[dim]{analyst_wall_time_tracker.format_summary()}[/dim]")
 
+    vote, run_states = None, [final_state]
+    if vote_runs > 1:
+        run_states += _extra_runs(graph, selections, portfolio, stats_handler, vote_runs)
+        vote = consensus([run_rating(state) for state in run_states])
+        _print_vote(vote)
+        if vote["representative"] is not None:
+            final_state = run_states[vote["representative"]]
+        graph.record_decision(selections["ticker"], selections["analysis_date"], final_state)
+
     usage = summarize(stats_handler.usage, config)
     _print_usage(usage)
 
     saved_to = _offer_reports(final_state, graph, selections["ticker"],
                               save=flags.get("save"), show=flags.get("show"), html=flags.get("html"),
                               trade_date=selections.get("analysis_date"),
-                              usage_markdown=render_markdown(usage))
-    _record_cost(usage, graph, config, selections, final_state, saved_to, time.time() - start_time)
+                              usage_markdown=render_markdown(usage),
+                              vote_markdown=render_vote(vote) if vote else None)
+    if saved_to and vote:
+        _save_run_reports(graph, run_states, selections["ticker"], saved_to)
+    _record_cost(usage, graph, config, selections, final_state, saved_to, time.time() - start_time, vote)
+
+
+def _vote_runs(flags: dict, config: dict) -> int:
+    """How many runs vote on this analysis: --runs, else vote_runs from the config."""
+    value = flags.get("runs") or config.get("vote_runs") or 1
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        raise typer.BadParameter(f"vote_runs must be a whole number, got {value!r}") from None
+
+
+def _extra_runs(graph, selections, portfolio, stats_handler, total: int) -> list[dict]:
+    """Runs 2..total of the same analysis, without the live display.
+
+    A run that fails is reported and left out of the vote rather than ending it.
+    """
+    from tradingagents.dataflows.config import run_config
+
+    states = []
+    for n in range(2, total + 1):
+        with console.status(f"[cyan]Run {n}/{total}: {selections['ticker']} {selections['analysis_date']}…[/cyan]"):
+            try:
+                with run_config(graph.config):
+                    init = graph.create_run_state(selections["ticker"], selections["analysis_date"],
+                                                  selections["asset_type"], portfolio)
+                    state = graph.graph.invoke(init, **graph.propagator.get_graph_args(callbacks=[stats_handler]))
+            except Exception as e:   # one failed run must not cost the others
+                console.print(f"[yellow]Run {n}/{total} failed and is left out of the vote: {e}[/yellow]")
+                continue
+        states.append(state)
+        console.print(f"  Run {n}/{total}: [bold]{run_rating(state)}[/bold]")
+    return states
+
+
+def _print_vote(vote: dict) -> None:
+    ratings = ", ".join(f"{i}:{r}" for i, r in enumerate(vote["ratings"], 1))
+    console.print(f"\n[bold]Consensus over {vote['runs']} runs: {vote['rating'] or 'REVIEW'}[/bold] "
+                  f"({agreement_label(vote)}, agreement {vote['agreement']:.0%})")
+    console.print(f"[dim]Ratings by run: {ratings}[/dim]")
+
+
+def _save_run_reports(graph, run_states, ticker, saved_to) -> None:
+    """Every run's own report under runs/run_N, next to the consensus report."""
+    from tradingagents.reporting import write_report_tree
+
+    for n, state in enumerate(run_states, 1):
+        try:
+            write_report_tree(state, ticker, Path(saved_to) / "runs" / f"run_{n}",
+                              settings=graph.run_settings(), html=False)
+        except Exception as e:
+            console.print(f"[yellow]Could not save run {n}'s report: {e}[/yellow]")
 
 
 def _print_usage(usage: dict) -> None:
@@ -419,7 +488,7 @@ def _print_usage(usage: dict) -> None:
         console.print("[dim]Set TRADINGAGENTS_MODEL_PRICES in .env to see costs.[/dim]")
 
 
-def _record_cost(usage, graph, config, selections, final_state, saved_to, elapsed) -> None:
+def _record_cost(usage, graph, config, selections, final_state, saved_to, elapsed, vote=None) -> None:
     """Append this run to the cost ledger next to the reports; a failure only warns."""
     from datetime import datetime
 
@@ -440,6 +509,7 @@ def _record_cost(usage, graph, config, selections, final_state, saved_to, elapse
             config=config,
             elapsed_seconds=elapsed,
             report_dir=saved_to or "",
+            vote=vote,
         ))
         console.print(f"[dim]Cost ledger:[/dim] {path.resolve()}")
     except Exception as e:   # the ledger must never cost the user the run
@@ -481,7 +551,7 @@ def _open_page(page: Path) -> None:
 
 
 def _offer_reports(final_state, graph, ticker, save=None, show=None, html=None, trade_date=None,
-                   usage_markdown=None):
+                   usage_markdown=None, vote_markdown=None):
     """Save the report tree and show it; ``save``/``show``/``html`` answer the questions when given.
 
     Returns the folder the report was saved in, or None when it was not saved.
@@ -514,7 +584,7 @@ def _offer_reports(final_state, graph, ticker, save=None, show=None, html=None, 
         saved = False
         try:
             report_file = graph.save_reports(final_state, ticker, save_path, html=html,
-                                             usage_markdown=usage_markdown)
+                                             usage_markdown=usage_markdown, vote_markdown=vote_markdown)
             saved = True
             saved_to = save_path
             console.print(f"\n[green]✓ Report saved to:[/green] {save_path.resolve()}")

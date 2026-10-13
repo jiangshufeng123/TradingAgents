@@ -33,6 +33,7 @@ LEDGER_FIELDS = (
     "llm_calls", "input_tokens", "output_tokens", "cached_input_tokens",
     "quick_input_tokens", "quick_output_tokens", "deep_input_tokens", "deep_output_tokens",
     "cost", "currency", "elapsed_seconds", "report_dir",
+    "vote_runs", "vote_ratings", "agreement",
 )
 
 
@@ -243,6 +244,7 @@ def append_ledger(path, row: dict) -> Path:
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    _upgrade_header(path)
     new = not path.exists() or path.stat().st_size == 0
     with open(path, "a", newline="", encoding="utf-8-sig" if new else "utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=LEDGER_FIELDS, extrasaction="ignore")
@@ -252,8 +254,24 @@ def append_ledger(path, row: dict) -> Path:
     return path
 
 
+def _upgrade_header(path: Path) -> None:
+    """Rewrite a ledger written with fewer columns under the current header."""
+    if not path.exists() or path.stat().st_size == 0:
+        return
+    with open(path, encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        if tuple(reader.fieldnames or ()) == LEDGER_FIELDS:
+            return
+        rows = list(reader)
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=LEDGER_FIELDS, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({k: row.get(k, "") for k in LEDGER_FIELDS})
+
+
 def ledger_row(summary: dict, *, run_time: str, ticker: str, trade_date: str, rating: str,
-               analysts, config: dict, elapsed_seconds: float, report_dir) -> dict:
+               analysts, config: dict, elapsed_seconds: float, report_dir, vote: dict | None = None) -> dict:
     total, tiers = summary["total"], summary["tiers"]
     quick, deep = tiers.get("quick", {}), tiers.get("deep", {})
     cost = summary["cost"]
@@ -267,4 +285,7 @@ def ledger_row(summary: dict, *, run_time: str, ticker: str, trade_date: str, ra
         "deep_input_tokens": deep.get("input_tokens", 0), "deep_output_tokens": deep.get("output_tokens", 0),
         "cost": "" if cost is None else round(cost, 6), "currency": summary["currency"],
         "elapsed_seconds": round(elapsed_seconds, 1), "report_dir": str(report_dir or ""),
+        "vote_runs": vote["runs"] if vote else 1,
+        "vote_ratings": " ".join(vote["ratings"]) if vote else rating,
+        "agreement": round(vote["agreement"], 2) if vote else 1,
     }

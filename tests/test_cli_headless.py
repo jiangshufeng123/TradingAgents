@@ -155,7 +155,7 @@ def test_the_command_passes_its_flags_to_the_run(monkeypatch):
                                                "--analysts", "market,news", "--save", "--no-show"])
 
     assert result.exit_code == 0, result.output
-    assert seen["flags"] == {**FLAGS, "html": None}
+    assert seen["flags"] == {**FLAGS, "html": None, "runs": None}
 
 
 @pytest.mark.unit

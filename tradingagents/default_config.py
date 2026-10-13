@@ -27,6 +27,8 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_MAX_TOKENS":           "max_tokens",
     # Cost ledger: prices per 1M tokens as "model=input/output, ...", and the
     # currency label shown with them.
+    "TRADINGAGENTS_DROP_UNSETTLED_BAR":   "drop_unsettled_bar",
+    "TRADINGAGENTS_VOTE_RUNS":            "vote_runs",
     "TRADINGAGENTS_MODEL_PRICES":         "model_prices",
     "TRADINGAGENTS_PRICE_CURRENCY":       "price_currency",
     # Data volume fed to the analysts (fewer articles, fewer input tokens).
@@ -150,6 +152,13 @@ def build_default_config() -> dict:
         # "deepseek-v4-pro=4/16, deepseek-flash=1/4".
         "model_prices": None,
         "price_currency": "",
+        # Drop the newest daily bar while its trading session is still open:
+        # its "close" is the latest trade and its volume a partial day.
+        "drop_unsettled_bar": True,
+        # Runs per CLI analysis. Above 1, the analysis runs that many times and
+        # the majority rating is the decision (see tradingagents/vote.py); the
+        # cost grows with it.
+        "vote_runs": 1,
         # Checkpoint/resume: when True, LangGraph saves state after each node
         # so a crashed run can resume from the last successful step.
         "checkpoint_enabled": False,

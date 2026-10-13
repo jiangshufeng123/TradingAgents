@@ -9,6 +9,13 @@ from tradingagents.dataflows.errors import NoMarketDataError
 from tradingagents.dataflows.files import replace_file
 from tradingagents.dataflows.symbols import normalize_symbol, safe_ticker_component
 from tradingagents.dataflows.vendors.yahoo.common import raise_for_empty, yf_retry
+from tradingagents.dataflows.vendors.yahoo.session import (
+    drop_unsettled_bar,
+    fetch_session,
+    load_session,
+    save_session,
+    session_closed_since,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -197,24 +204,31 @@ def load_ohlcv(symbol: str, as_of_date: str, fill_gaps: bool = True) -> pd.DataF
     # transient rate limit). Treat an empty/columnless cache as a miss and
     # re-fetch rather than serving the poisoned file forever.
     data = None
+    session = None
     if os.path.exists(data_file):
         cached = pd.read_csv(data_file, on_bad_lines="skip", encoding="utf-8")
+        session = load_session(data_file)
         if (
             not cached.empty
             and "Close" in cached.columns
             and _cache_is_fresh(data_file, as_of_dt, now)
+            # A download made mid-session holds that session's partial bar;
+            # once the session has closed, fetch its final one.
+            and not session_closed_since(session, os.path.getmtime(data_file))
         ):
             data = cached
 
     if data is None:
         # yf.download catches every error, a rate limit included, and returns
         # an empty frame. Ticker.history raises the rate limit, so it is retried.
-        downloaded = yf_retry(lambda: yf.Ticker(canonical).history(
+        ticker = yf.Ticker(canonical)
+        downloaded = yf_retry(lambda: ticker.history(
             start=start_str,
             end=end_str,
             auto_adjust=True,
             actions=False,
         ))
+        session = fetch_session(ticker)
         if downloaded is None:
             raise_for_empty(symbol, canonical, "price rows")
         downloaded = _ensure_date_column(downloaded.reset_index())
@@ -222,12 +236,15 @@ def load_ohlcv(symbol: str, as_of_date: str, fill_gaps: bool = True) -> pd.DataF
         if downloaded.empty or "Close" not in downloaded.columns:
             raise_for_empty(symbol, canonical, "price rows")
         replace_file(data_file, lambda temp: downloaded.to_csv(temp, index=False, encoding="utf-8"))
+        save_session(data_file, session)
         data = downloaded
 
     data = _clean_dataframe(data)
 
     # Filter to as_of_date to prevent look-ahead bias in backtesting.
     data = data[data["Date"] <= as_of_dt]
+    # A bar whose session is still trading is not a day's result yet.
+    data = drop_unsettled_bar(data, session, canonical)
 
     # A closeless newest bar is an unsettled session, not a symbol without data.
     # _fill_price_gaps below drops it, here and mid-series alike, so the frame

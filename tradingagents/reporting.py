@@ -90,7 +90,8 @@ def _report_parts(final_state: dict) -> list[tuple[str, str, list[tuple[str, str
 
 
 def write_report_tree(final_state: dict, ticker: str, save_path, settings: dict | None = None,
-                      html: bool = True, usage_markdown: str | None = None) -> Path:
+                      html: bool = True, usage_markdown: str | None = None,
+                      vote_markdown: str | None = None) -> Path:
     """Save a completed run's reports to ``save_path``; return the complete-report path.
 
     ``settings`` (``TradingAgentsGraph.run_settings()``) adds what produced the run
@@ -100,6 +101,9 @@ def write_report_tree(final_state: dict, ticker: str, save_path, settings: dict 
     save_path = Path(save_path)
     save_path.mkdir(parents=True, exist_ok=True)
     parts = _report_parts(final_state)
+    if vote_markdown:
+        # Several runs voted: the vote comes first, then the run that carries it.
+        parts.insert(0, ("0. Consensus Across Runs", "0_vote", [("Vote", "vote.md", vote_markdown)]))
     if usage_markdown:
         # The run's token usage and cost, as its own section and file.
         parts.append(("VI. Token Usage and Cost", "6_usage", [("Usage by role", "usage.md", usage_markdown)]))
