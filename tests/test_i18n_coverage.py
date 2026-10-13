@@ -52,8 +52,17 @@ class TestLanguageInstruction:
         # instead, and a Buy reads as Sell (#1435).
         from tradingagents.dataflows.config import set_config
         set_config({"output_language": "中文"})
-        out = get_language_instruction()
+        out = get_language_instruction(labelled_lines=True)
         assert "**Rating**:" in out and "FINAL TRANSACTION PROPOSAL" in out
+
+    def test_agents_that_make_no_call_are_not_shown_the_rating_lines(self):
+        # Naming the labels to an analyst reads as asking for them: it then
+        # ends its report with its own rating, which downstream agents cite.
+        from tradingagents.dataflows.config import set_config
+        set_config({"output_language": "中文"})
+        out = get_language_instruction()
+        assert "中文" in out
+        assert "Rating" not in out and "FINAL TRANSACTION PROPOSAL" not in out
 
 
 @pytest.mark.unit
@@ -62,7 +71,18 @@ def test_report_agent_applies_language_instruction(rel):
     path = _AGENTS_DIR / rel
     assert path.exists(), f"missing agent module: {rel}"
     src = path.read_text(encoding="utf-8")
-    assert "get_language_instruction()" in src, (
+    assert "get_language_instruction(" in src, (
         f"{rel} does not apply get_language_instruction(); its output would "
         f"ignore the configured output_language (#740/#801)."
     )
+
+
+DECIDING_AGENTS = ["managers/research_manager.py", "managers/portfolio_manager.py", "trader/trader.py"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("rel", REPORT_AGENTS)
+def test_only_the_deciding_agents_get_the_labelled_line_instruction(rel):
+    src = (_AGENTS_DIR / rel).read_text(encoding="utf-8")
+    asks_for_labels = "get_language_instruction(labelled_lines=True)" in src
+    assert asks_for_labels == (rel in DECIDING_AGENTS)

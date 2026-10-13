@@ -58,7 +58,7 @@ def create_trader(llm):
                     "or a range; convert a percentage distance to the price level it "
                     "implies, or omit the field if you cannot state a number. "
                     + NO_EXTERNAL_TOOLS
-                    + get_language_instruction()
+                    + get_language_instruction(labelled_lines=True)
                 ),
             },
             {

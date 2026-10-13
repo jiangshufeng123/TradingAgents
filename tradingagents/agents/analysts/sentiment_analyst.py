@@ -90,7 +90,8 @@ def create_sentiment_analyst(llm):
                 (
                     "system",
                     "You are a helpful AI assistant, collaborating with other assistants."
-                    " Report what your tools support; another agent decides the trade."
+                    " Report what your tools support; another agent decides the trade,"
+                    " so do not end with a rating, a buy/hold/sell recommendation or a trade proposal of your own."
                     # No tool-calling here: the data is pre-fetched into the
                     # prompt, so tool-range wording would only invite a
                     # hallucinated tool call (#1130).

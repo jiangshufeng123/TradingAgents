@@ -11,7 +11,7 @@ from tradingagents.dataflows.vendors.yahoo.fundamentals import get_company_profi
 logger = logging.getLogger(__name__)
 
 
-def get_language_instruction() -> str:
+def get_language_instruction(labelled_lines: bool = False) -> str:
     """Return a prompt instruction for the configured output language.
 
     Returns empty string when English (default), so no extra tokens are used.
@@ -19,11 +19,20 @@ def get_language_instruction() -> str:
     analysts, researchers, debaters, research manager, trader, and
     portfolio manager — so a non-English run produces a fully localized
     report rather than a mix of languages.
+
+    ``labelled_lines`` is for the agents whose format asks for the rating
+    lines (research manager, trader, portfolio manager). Everyone else gets
+    the plain instruction: naming the "**Rating**:" and "FINAL TRANSACTION
+    PROPOSAL:" lines to an analyst or debater reads as a request for them, and
+    an analyst's own rating then travels downstream as if it were the
+    research call.
     """
     from tradingagents.dataflows.config import get_config
     lang = get_config().get("output_language", "English")
     if lang.strip().lower() == "english":
         return ""
+    if not labelled_lines:
+        return f" Write your entire response in {lang}."
     # The labelled lines are read by the program, so they keep their English
     # label and value: a translated rating line leaves the reader prose to
     # search, where a negated rating ("not a Sell") reads as the call (#1435).
