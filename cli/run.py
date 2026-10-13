@@ -385,7 +385,8 @@ def run_analysis(checkpoint: bool | None = None, portfolio=None, flags=None):
     console.print(f"[dim]{analyst_wall_time_tracker.format_summary()}[/dim]")
 
     _offer_reports(final_state, graph, selections["ticker"],
-                   save=flags.get("save"), show=flags.get("show"), html=flags.get("html"))
+                   save=flags.get("save"), show=flags.get("show"), html=flags.get("html"),
+                   trade_date=selections.get("analysis_date"))
 
 
 def _yes(question: str) -> bool:
@@ -422,7 +423,7 @@ def _open_page(page: Path) -> None:
         console.print(f"  [dim]Could not open a browser; the page is at:[/dim] {page}")
 
 
-def _offer_reports(final_state, graph, ticker, save=None, show=None, html=None):
+def _offer_reports(final_state, graph, ticker, save=None, show=None, html=None, trade_date=None):
     """Save the report tree and show it; ``save``/``show``/``html`` answer the questions when given.
 
     A saved report includes the HTML page unless ``html`` is False. Someone
@@ -436,11 +437,17 @@ def _offer_reports(final_state, graph, ticker, save=None, show=None, html=None):
         # Under results_dir, not the working directory: in Docker the working
         # directory is inside the container and the report goes with it, while
         # results_dir is the mounted volume the rest of the run already writes to.
-        save_path = graph.default_report_path(ticker)
-        if asked:   # someone at the prompt may pick another folder
-            save_path = Path(typer.prompt(
-                "Save path (press Enter for default)", default=str(save_path)
-            ).strip())
+        # Every run gets its own <TICKER>/<date>_<time> subfolder under the base
+        # folder, including a base typed at the prompt, so runs never overwrite
+        # each other.
+        trade_date = trade_date or final_state.get("trade_date")
+        base = graph.reports_base_dir()
+        if asked:   # someone at the prompt may pick another base folder
+            base = Path(typer.prompt(
+                "Report folder (each run is saved in its own TICKER/date_time subfolder; "
+                "press Enter for default)", default=str(base)
+            ).strip().strip('"'))
+        save_path = graph.default_report_path(ticker, trade_date, base=base)
         if html is None:
             html = _yes("Also save it as an HTML page?") if asked else True
         saved = False

@@ -48,6 +48,17 @@ _NOT_IN_SIGNATURE = frozenset({
 })
 
 
+def run_report_path(base, ticker, trade_date=None, now=None) -> Path:
+    """``<base>/<TICKER>/<analysis-date>_<run-time>`` for one run's reports.
+
+    The run time (to the second) keeps two runs of the same ticker and date
+    apart; without an analysis date the folder is just the run time.
+    """
+    stamp = (now or datetime.now()).strftime("%Y%m%d_%H%M%S")
+    name = f"{trade_date}_{stamp}" if trade_date else stamp
+    return Path(base) / safe_ticker_component(ticker) / name
+
+
 class TradingAgentsGraph:
     """Main class that orchestrates the trading agents framework."""
 
@@ -282,13 +293,27 @@ class TradingAgentsGraph:
         report is also written as one HTML page unless ``html`` is False.
         """
         if save_path is None:
-            save_path = self.default_report_path(ticker)
+            save_path = self.default_report_path(ticker, final_state.get("trade_date"))
         return write_report_tree(final_state, ticker, save_path, settings=self.run_settings(), html=html)
 
-    def default_report_path(self, ticker) -> Path:
-        """Where a run's reports go unless told otherwise: under results_dir, stamped now."""
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        return Path(self.config["results_dir"]) / "reports" / f"{safe_ticker_component(ticker)}_{stamp}"
+    def reports_base_dir(self) -> Path:
+        """The folder every run's report subfolder goes under.
+
+        ``reports_dir`` (TRADINGAGENTS_REPORTS_DIR) when set, else <results_dir>/reports.
+        """
+        base = self.config.get("reports_dir")
+        if base:
+            return Path(base).expanduser()
+        return Path(self.config["results_dir"]) / "reports"
+
+    def default_report_path(self, ticker, trade_date=None, base=None) -> Path:
+        """Where a run's reports go unless told otherwise.
+
+        ``<base>/<TICKER>/<analysis-date>_<run-time>``: one folder per ticker,
+        one subfolder per run, so a later run never overwrites an earlier one.
+        ``base`` defaults to :meth:`reports_base_dir`.
+        """
+        return run_report_path(base if base is not None else self.reports_base_dir(), ticker, trade_date)
 
     def create_run_state(self, company_name, trade_date, asset_type: str = "stock", portfolio=None):
         """Build a run's initial state; propagate() and the CLI both start here.

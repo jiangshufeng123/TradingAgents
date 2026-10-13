@@ -56,8 +56,19 @@ def test_save_reports_defaults_under_results_dir(tmp_path):
     graph.run_settings = lambda: SETTINGS
     out = graph.save_reports(_state(), "AAPL")
     assert out.exists()
-    assert out.parent.parent.name == "reports"  # results_dir/reports/AAPL_<stamp>/...
-    assert out.parent.name.startswith("AAPL_")
+    # results_dir/reports/AAPL/<stamp>/...
+    assert out.parent.parent.parent.name == "reports"
+    assert out.parent.parent.name == "AAPL"
+
+
+@pytest.mark.unit
+def test_save_reports_names_the_run_folder_by_analysis_date(tmp_path):
+    graph = object.__new__(TradingAgentsGraph)
+    graph.config = {"results_dir": str(tmp_path), "reports_dir": str(tmp_path / "r")}
+    graph.run_settings = lambda: SETTINGS
+    out = graph.save_reports(dict(_state(), trade_date="2026-10-09"), "AAPL")
+    assert out.parent.parent == tmp_path / "r" / "AAPL"
+    assert out.parent.name.startswith("2026-10-09_")
 
 
 
