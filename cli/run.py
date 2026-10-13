@@ -31,6 +31,7 @@ from tradingagents.graph.analyst_execution import (
     build_analyst_execution_plan,
 )
 from tradingagents.graph.trading_graph import TradingAgentsGraph
+from tradingagents.usage import append_ledger, ledger_row, render_markdown, summarize
 
 
 def _run_directory(config: dict, ticker: str, trade_date: str) -> Path:
@@ -384,9 +385,65 @@ def run_analysis(checkpoint: bool | None = None, portfolio=None, flags=None):
         )
     console.print(f"[dim]{analyst_wall_time_tracker.format_summary()}[/dim]")
 
-    _offer_reports(final_state, graph, selections["ticker"],
-                   save=flags.get("save"), show=flags.get("show"), html=flags.get("html"),
-                   trade_date=selections.get("analysis_date"))
+    usage = summarize(stats_handler.usage, config)
+    _print_usage(usage)
+
+    saved_to = _offer_reports(final_state, graph, selections["ticker"],
+                              save=flags.get("save"), show=flags.get("show"), html=flags.get("html"),
+                              trade_date=selections.get("analysis_date"),
+                              usage_markdown=render_markdown(usage))
+    _record_cost(usage, graph, config, selections, final_state, saved_to, time.time() - start_time)
+
+
+def _print_usage(usage: dict) -> None:
+    """Token usage and cost by role, after the run."""
+    from rich.table import Table
+
+    cur = usage["currency"]
+    table = Table(title="Token usage and cost", show_lines=False)
+    for name, justify in (("Role", "left"), ("Model", "left"), ("Calls", "right"),
+                          ("Input", "right"), ("Output", "right"), ("Cost", "right")):
+        table.add_column(name, justify=justify)
+
+    def money(value):
+        return "—" if value is None else f"{cur}{value:.4f}"
+
+    for r in usage["rows"]:
+        table.add_row(r["role"], r["model"], str(r["calls"]), f"{r['input_tokens']:,}",
+                      f"{r['output_tokens']:,}", money(r["cost"]))
+    t = usage["total"]
+    table.add_row("[bold]Total[/bold]", "", f"[bold]{t['calls']}[/bold]", f"[bold]{t['input_tokens']:,}[/bold]",
+                  f"[bold]{t['output_tokens']:,}[/bold]", f"[bold]{money(usage['cost'])}[/bold]")
+    console.print(table)
+    if not usage["priced"]:
+        console.print("[dim]Set TRADINGAGENTS_MODEL_PRICES in .env to see costs.[/dim]")
+
+
+def _record_cost(usage, graph, config, selections, final_state, saved_to, elapsed) -> None:
+    """Append this run to the cost ledger next to the reports; a failure only warns."""
+    from datetime import datetime
+
+    try:
+        if saved_to:
+            base = Path(saved_to).parent.parent
+        elif config.get("reports_dir"):
+            base = Path(config["reports_dir"]).expanduser()
+        else:
+            base = Path(config["results_dir"]) / "reports"
+        path = append_ledger(base / "cost_ledger.csv", ledger_row(
+            usage,
+            run_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            ticker=selections["ticker"],
+            trade_date=selections.get("analysis_date", ""),
+            rating=run_rating(final_state),
+            analysts=[getattr(a, "value", a) for a in selections.get("analysts", [])],
+            config=config,
+            elapsed_seconds=elapsed,
+            report_dir=saved_to or "",
+        ))
+        console.print(f"[dim]Cost ledger:[/dim] {path.resolve()}")
+    except Exception as e:   # the ledger must never cost the user the run
+        console.print(f"[yellow]Could not update the cost ledger: {e}[/yellow]")
 
 
 def _yes(question: str) -> bool:
@@ -423,14 +480,18 @@ def _open_page(page: Path) -> None:
         console.print(f"  [dim]Could not open a browser; the page is at:[/dim] {page}")
 
 
-def _offer_reports(final_state, graph, ticker, save=None, show=None, html=None, trade_date=None):
+def _offer_reports(final_state, graph, ticker, save=None, show=None, html=None, trade_date=None,
+                   usage_markdown=None):
     """Save the report tree and show it; ``save``/``show``/``html`` answer the questions when given.
+
+    Returns the folder the report was saved in, or None when it was not saved.
 
     A saved report includes the HTML page unless ``html`` is False. Someone
     answering the save question at the prompt is also asked about the page and
     offered to open it; a run whose flags answer the save question asks neither.
     """
     asked = save is None
+    saved_to = None
     if asked:
         save = typer.prompt("Save report?", default="Y").strip().upper() in ("Y", "YES", "")
     if save:
@@ -452,8 +513,10 @@ def _offer_reports(final_state, graph, ticker, save=None, show=None, html=None, 
             html = _yes("Also save it as an HTML page?") if asked else True
         saved = False
         try:
-            report_file = graph.save_reports(final_state, ticker, save_path, html=html)
+            report_file = graph.save_reports(final_state, ticker, save_path, html=html,
+                                             usage_markdown=usage_markdown)
             saved = True
+            saved_to = save_path
             console.print(f"\n[green]✓ Report saved to:[/green] {save_path.resolve()}")
             console.print(f"  [dim]Complete report:[/dim] {report_file.name}")
         except Exception as e:
@@ -468,3 +531,4 @@ def _offer_reports(final_state, graph, ticker, save=None, show=None, html=None, 
         show = typer.prompt("\nDisplay full report on screen?", default="Y").strip().upper() in ("Y", "YES", "")
     if show:
         display_complete_report(final_state)
+    return saved_to

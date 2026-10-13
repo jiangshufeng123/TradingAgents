@@ -25,6 +25,14 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_TEMPERATURE":          "temperature",
     "TRADINGAGENTS_LLM_MAX_RETRIES":      "llm_max_retries",
     "TRADINGAGENTS_MAX_TOKENS":           "max_tokens",
+    # Cost ledger: prices per 1M tokens as "model=input/output, ...", and the
+    # currency label shown with them.
+    "TRADINGAGENTS_MODEL_PRICES":         "model_prices",
+    "TRADINGAGENTS_PRICE_CURRENCY":       "price_currency",
+    # Data volume fed to the analysts (fewer articles, fewer input tokens).
+    "TRADINGAGENTS_NEWS_ARTICLE_LIMIT":         "news_article_limit",
+    "TRADINGAGENTS_GLOBAL_NEWS_ARTICLE_LIMIT":  "global_news_article_limit",
+    "TRADINGAGENTS_GLOBAL_NEWS_LOOKBACK_DAYS":  "global_news_lookback_days",
     # Provider-specific reasoning/thinking knobs (None = each provider's own
     # default). Settable here for non-interactive runs; the CLI also offers an
     # interactive choice, which is skipped when the matching var is set.
@@ -127,6 +135,13 @@ def build_default_config() -> dict:
         # unbounded reasoning/output and hangs or trips a gateway idle timeout
         # (e.g. some deepseek-v4-flash deployments, #1204).
         "max_tokens": None,
+        # Token usage and cost: every CLI run writes a usage section into its
+        # report and appends a row to <reports base>/cost_ledger.csv. Costs are
+        # shown only for models priced here (per 1M tokens), e.g.
+        # {"deepseek-v4-pro": (4.0, 16.0)} or, from the environment,
+        # "deepseek-v4-pro=4/16, deepseek-flash=1/4".
+        "model_prices": None,
+        "price_currency": "",
         # Checkpoint/resume: when True, LangGraph saves state after each node
         # so a crashed run can resume from the last successful step.
         "checkpoint_enabled": False,

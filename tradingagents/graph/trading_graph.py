@@ -285,7 +285,7 @@ class TradingAgentsGraph:
             "tool_vendors": dict(cfg.get("tool_vendors") or {}),
         }
 
-    def save_reports(self, final_state, ticker, save_path=None, html=True) -> Path:
+    def save_reports(self, final_state, ticker, save_path=None, html=True, usage_markdown=None) -> Path:
         """Write the report tree for a completed run, like the CLI does.
 
         Programmatic callers get the same on-disk reports the CLI produces. Pass
@@ -294,7 +294,8 @@ class TradingAgentsGraph:
         """
         if save_path is None:
             save_path = self.default_report_path(ticker, final_state.get("trade_date"))
-        return write_report_tree(final_state, ticker, save_path, settings=self.run_settings(), html=html)
+        return write_report_tree(final_state, ticker, save_path, settings=self.run_settings(), html=html,
+                                 usage_markdown=usage_markdown)
 
     def reports_base_dir(self) -> Path:
         """The folder every run's report subfolder goes under.
