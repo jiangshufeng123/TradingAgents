@@ -250,3 +250,25 @@ def test_sentiment_says_when_a_share_money_flow_is_unavailable(monkeypatch):
     assert "unavailable" in sa._a_share_money_flow("600519.SS", "2026-10-07", TODAY)
     assert sa._a_share_money_flow("0700.HK", "2026-10-07", TODAY) == ""
     assert sa._a_share_money_flow("NVDA", "2026-10-07", TODAY) == ""
+
+
+@pytest.mark.unit
+def test_a_request_that_hangs_is_abandoned_not_waited_on(monkeypatch):
+    import threading as th
+    cn._CACHE.clear()
+    release = th.Event()
+
+    class _Fake:
+        @staticmethod
+        def stuck(**k):
+            release.wait(5)
+            return pd.DataFrame()
+
+    monkeypatch.setattr(cn, "_ak", lambda: _Fake)
+    monkeypatch.setattr(cn, "CALL_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(cn.time, "sleep", lambda s: None)
+    started = cn.time.time()
+    with pytest.raises(VendorUnavailableError, match="AkShareTimeoutError"):
+        cn.call("stuck")
+    assert cn.time.time() - started < 2
+    release.set()

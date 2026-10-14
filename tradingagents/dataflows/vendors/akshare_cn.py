@@ -109,6 +109,37 @@ _CACHE: dict = {}
 _CACHE_LOCK = threading.Lock()
 CACHE_SECONDS = 600
 RETRIES = 3
+# AkShare makes its requests without a timeout, so a stalled connection to a
+# Chinese site can hang a run for hours. Each attempt is given this long.
+CALL_TIMEOUT_SECONDS = 30
+
+
+class AkShareTimeoutError(TimeoutError):
+    """An AkShare request did not answer within CALL_TIMEOUT_SECONDS."""
+
+
+def _with_timeout(func, kwargs, seconds: float):
+    """``func(**kwargs)``, or AkShareTimeoutError after ``seconds``.
+
+    The request runs on a daemon thread: a request that never returns is left
+    behind rather than holding the run (or the interpreter's exit).
+    """
+    box: dict = {}
+
+    def run():
+        try:
+            box["value"] = func(**kwargs)
+        except BaseException as exc:   # handed back to the caller below
+            box["error"] = exc
+
+    worker = threading.Thread(target=run, daemon=True, name=f"akshare-{getattr(func, '__name__', 'call')}")
+    worker.start()
+    worker.join(seconds)
+    if worker.is_alive():
+        raise AkShareTimeoutError(f"no answer within {seconds:.0f}s")
+    if "error" in box:
+        raise box["error"]
+    return box.get("value")
 
 
 def call(func_name: str, **kwargs) -> pd.DataFrame:
@@ -128,7 +159,7 @@ def call(func_name: str, **kwargs) -> pd.DataFrame:
     last = None
     for attempt in range(RETRIES):
         try:
-            df = func(**kwargs)
+            df = _with_timeout(func, kwargs, CALL_TIMEOUT_SECONDS)
             break
         except Exception as exc:   # network, upstream format or throttling
             last = exc
