@@ -35,6 +35,8 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_HTML_REPORT":          "html_report",
     "TRADINGAGENTS_OPEN_REPORT":          "open_report",
     "TRADINGAGENTS_ANALYSTS":             "default_analysts",
+    # Tickers for `tradingagents daily`, comma-separated.
+    "TRADINGAGENTS_WATCHLIST":            "watchlist",
     "TRADINGAGENTS_MODEL_PRICES":         "model_prices",
     "TRADINGAGENTS_PRICE_CURRENCY":       "price_currency",
     # Data volume fed to the analysts (fewer articles, fewer input tokens).
@@ -173,6 +175,8 @@ def build_default_config() -> dict:
         "html_report": None,
         "open_report": None,
         "default_analysts": None,
+        # Tickers `tradingagents daily` analyzes, e.g. "NVDA,600519.SS,0700.HK".
+        "watchlist": None,
         # Checkpoint/resume: when True, LangGraph saves state after each node
         # so a crashed run can resume from the last successful step.
         "checkpoint_enabled": False,

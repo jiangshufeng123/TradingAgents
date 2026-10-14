@@ -5,7 +5,8 @@ import typer
 from cli.display import console
 from cli.models import AnalystType, AssetType
 from cli.prompts import filter_analysts_for_asset_type, parse_analysts
-from cli.run import run_analysis
+from cli.run import flags_with_config_defaults, run_analysis
+from cli.selections import unattended_gaps
 from tradingagents.backtest import iter_grid, run_backtest, summarize
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.portfolio import load_portfolio
@@ -159,6 +160,87 @@ def backtest(
         console.print(f"[yellow]failed:[/yellow] {ticker} {date}: {reason}")
     for ticker, reason in result.settlement_failures:
         console.print(f"[yellow]unsettled:[/yellow] {ticker}: {reason}")
+
+
+ALL_ANALYSTS = "market,sentiment,news,fundamentals"
+
+
+def _watchlist(tickers: str | None) -> list[str]:
+    text = tickers or DEFAULT_CONFIG.get("watchlist") or ""
+    return list(dict.fromkeys(t.strip().upper() for t in str(text).replace(";", ",").split(",") if t.strip()))
+
+
+@app.command()
+def daily(
+    tickers: str = typer.Argument(
+        None, help="Comma-separated tickers; omit to use TRADINGAGENTS_WATCHLIST from .env"),
+    date: str = typer.Option(None, "--date", help="Analysis date, YYYY-MM-DD; default today"),
+    runs: int = typer.Option(None, "--runs", min=1, help="Runs per ticker (majority vote); default TRADINGAGENTS_VOTE_RUNS"),
+):
+    """Analyze every ticker on the watchlist, unattended, and log each decision for the scoreboard."""
+    from datetime import date as _date
+
+    names = _watchlist(tickers)
+    if not names:
+        console.print("[red]No tickers: pass them (e.g. NVDA,600519.SS) or set TRADINGAGENTS_WATCHLIST in .env[/red]")
+        raise typer.Exit(code=1)
+    base = flags_with_config_defaults(
+        {"date": date or _date.today().isoformat(), "save": True, "show": False, "html": True,
+         "open": False, "runs": runs}, DEFAULT_CONFIG)
+    base["analysts"] = base.get("analysts") or ALL_ANALYSTS
+    # Nobody is there to answer a question, so everything a question would ask must be set.
+    gaps = unattended_gaps({**base, "ticker": names[0]})
+    if gaps:
+        console.print("[red]An unattended run needs these set in .env (or as flags):[/red]")
+        for gap in gaps:
+            console.print(f"  {gap}")
+        raise typer.Exit(code=1)
+
+    done, failed = [], []
+    for index, ticker in enumerate(names, 1):
+        console.rule(f"[bold cyan]{index}/{len(names)} {ticker} {base['date']}")
+        try:
+            run_analysis(portfolio=None, flags={**base, "ticker": ticker})
+            done.append(ticker)
+        except (Exception, typer.Exit) as exc:   # one ticker must not end the watchlist
+            failed.append((ticker, f"{type(exc).__name__}: {exc}"))
+            console.print(f"[yellow]{ticker} failed: {exc}[/yellow]")
+    console.rule("[bold]Daily run finished")
+    console.print(f"Analyzed {len(done)}/{len(names)}: {', '.join(done) or '-'}")
+    for ticker, reason in failed:
+        console.print(f"[yellow]failed:[/yellow] {ticker}: {reason}")
+    console.print("Decisions are in the memory log; run [bold]tradingagents scoreboard[/bold] once they have settled.")
+
+
+@app.command()
+def scoreboard(
+    settle: bool = typer.Option(
+        True, "--settle/--no-settle",
+        help="First settle decisions whose holding window has traded (fetches prices and writes "
+             "a short LLM reflection for each); --no-settle only reads the log"),
+):
+    """Score the live decisions: direction hit rate and alpha, by rating and by ticker."""
+    from datetime import date as _date
+    from pathlib import Path
+
+    from tradingagents import scoreboard as sb
+
+    config = DEFAULT_CONFIG
+    if settle:
+        try:
+            from tradingagents.graph.trading_graph import TradingAgentsGraph
+
+            with console.status("[cyan]Settling decisions whose holding window has traded…[/cyan]"):
+                outcome = TradingAgentsGraph(config=config).settle_all_pending()
+            if getattr(outcome, "failed", None):
+                console.print(f"[yellow]{len(outcome.failed)} decision(s) could not be settled now.[/yellow]")
+        except Exception as exc:   # still show what is already settled
+            console.print(f"[yellow]Settling failed ({exc}); showing what is already settled.[/yellow]")
+    board = sb.build(config["memory_log_path"])
+    console.print(sb.render_markdown(board, _date.today().isoformat()))
+    base = Path(config.get("reports_dir") or Path(config["results_dir"]) / "reports").expanduser()
+    md, csv_path = sb.write(board, base, _date.today().isoformat())
+    console.print(f"\n[dim]Saved:[/dim] {md}\n[dim]       [/dim] {csv_path}")
 
 
 if __name__ == "__main__":
