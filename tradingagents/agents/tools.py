@@ -289,3 +289,28 @@ def get_prediction_markets(
         str: A formatted markdown report of matching prediction markets
     """
     return route_to_vendor("get_prediction_markets", topic, limit, trade_date or None)
+
+
+@tool
+def get_china_market_context(
+    ticker: Annotated[str, InjectedState("company_of_interest")],
+    curr_date: Annotated[str, "Current date in yyyy-mm-dd format"],
+    look_back_days: Annotated[int | None, "Days of fast news to include; omit for 3"] = None,
+    trade_date: Annotated[str, InjectedState("trade_date")] = "",
+) -> str:
+    """
+    China market context for an instrument listed in mainland China (A-share,
+    .SS/.SZ) or Hong Kong (.HK): China CPI, PMI and LPR as published by the
+    date, Cailianpress and East Money fast news, the stock's daily main-force
+    money flow (A-shares), and today's Stock Connect flows. For any other
+    listing it says the context does not apply. Uses the configured china_data
+    vendor (AkShare).
+
+    Args:
+        curr_date (str): Current date in yyyy-mm-dd format
+        look_back_days (int): Days of fast news to include; omit for 3
+
+    Returns:
+        str: A formatted markdown report
+    """
+    return route_to_vendor("get_china_market_context", ticker, as_of(curr_date, trade_date), look_back_days)

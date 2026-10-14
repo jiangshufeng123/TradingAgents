@@ -39,6 +39,10 @@ dev = [
 bedrock = [
     "langchain-aws>=1.7.9",
 ]
+# A-share and Hong Kong data (AkShare): pip install "tradingagents[cn]".
+cn = [
+    "akshare>=1.19",
+]
 
 [project.scripts]
 tradingagents = "cli.main:app"

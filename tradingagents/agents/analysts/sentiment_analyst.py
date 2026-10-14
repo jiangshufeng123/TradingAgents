@@ -40,6 +40,16 @@ from tradingagents.dataflows.vendors.reddit import (
 from tradingagents.dataflows.vendors.stocktwits import fetch_stocktwits_messages
 
 
+def _a_share_money_flow(ticker: str, start_date: str, end_date: str) -> str:
+    """The A-share money-flow table for the window, or "" (other markets, or no data)."""
+    try:
+        from tradingagents.dataflows.vendors.akshare_cn import fund_flow_lines
+
+        return "\n".join(fund_flow_lines(ticker, start_date, end_date))
+    except Exception:   # an optional source never stops the sentiment report
+        return ""
+
+
 def _seven_days_back(trade_date: str) -> str:
     return (datetime.strptime(trade_date, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
 
@@ -84,6 +94,14 @@ def create_sentiment_analyst(llm):
             reddit_block=reddit_block,
             subreddits=subreddits,
         )
+        # A-shares: StockTwits and Reddit barely cover them; daily main-force
+        # money flow is the local read on who is buying.
+        flow_block = _a_share_money_flow(ticker, start_date, end_date)
+        if flow_block:
+            system_message += (
+                "\n\nAdditional source for this A-share listing (weigh it as a sentiment input; "
+                "StockTwits and Reddit coverage of A-shares is thin):\n" + flow_block
+            )
 
         prompt = ChatPromptTemplate.from_messages(
             [

@@ -196,10 +196,13 @@ def build_default_config() -> dict:
             "technical_indicators": "yfinance",  # Options: alpha_vantage, yfinance
             # Statements come from SEC EDGAR as filed (US filers), then Yahoo; the
         # overview and insider tools, which SEC EDGAR does not serve, from Yahoo.
-        "fundamental_data": "sec_edgar,yfinance",  # Options: sec_edgar, alpha_vantage, yfinance
-            "news_data": "yfinance",             # Options: alpha_vantage, yfinance
+        # AkShare (akshare) serves A-share (.SS/.SZ) and Hong Kong (.HK) listings
+        # and steps aside for every other symbol, so it leads the chains below.
+        "fundamental_data": "akshare,sec_edgar,yfinance",  # Options: akshare, sec_edgar, alpha_vantage, yfinance
+            "news_data": "akshare,yfinance",     # Options: akshare, alpha_vantage, yfinance
             "macro_data": "fred",                # Options: fred (needs FRED_API_KEY)
             "prediction_markets": "polymarket",  # Options: polymarket (keyless)
+            "china_data": "akshare",             # China macro / fast news / money flow (A-share, HK)
         },
         # Tool-level configuration (takes precedence over category-level)
         "tool_vendors": {
