@@ -402,6 +402,8 @@ def run_analysis(checkpoint: bool | None = None, portfolio=None, flags=None):
 
     usage = summarize(stats_handler.usage, config)
     _print_usage(usage)
+    # The run's own duration: the questions below can wait on the user for hours.
+    elapsed = time.time() - start_time
 
     saved_to = _offer_reports(final_state, graph, selections["ticker"],
                               save=flags.get("save"), show=flags.get("show"), html=flags.get("html"),
@@ -410,7 +412,7 @@ def run_analysis(checkpoint: bool | None = None, portfolio=None, flags=None):
                               vote_markdown=render_vote(vote) if vote else None)
     if saved_to and vote:
         _save_run_reports(graph, run_states, selections["ticker"], saved_to)
-    _record_cost(usage, graph, config, selections, final_state, saved_to, time.time() - start_time, vote)
+    _record_cost(usage, graph, config, selections, final_state, saved_to, elapsed, vote)
 
 
 def _vote_runs(flags: dict, config: dict) -> int:
