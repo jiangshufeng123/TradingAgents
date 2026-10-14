@@ -98,8 +98,41 @@ def _build_run_config(selections: dict, checkpoint: bool | None) -> dict:
     return config
 
 
+_BOOL_WORDS = {"true": True, "1": True, "yes": True, "y": True, "on": True,
+               "false": False, "0": False, "no": False, "n": False, "off": False}
+
+
+def _as_bool(value):
+    """A config answer as True/False, or None when it is unset."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return value
+    word = str(value).strip().lower()
+    if word not in _BOOL_WORDS:
+        raise typer.BadParameter(f"expected true/false, got {value!r}")
+    return _BOOL_WORDS[word]
+
+
+def flags_with_config_defaults(flags: dict, config: dict) -> dict:
+    """Command-line flags, with the config (.env) answering any left unset.
+
+    TRADINGAGENTS_SAVE_REPORT / _SHOW_REPORT / _HTML_REPORT / _OPEN_REPORT answer
+    the questions after a run, and TRADINGAGENTS_ANALYSTS picks the analysts; a
+    flag given on the command line still wins.
+    """
+    merged = dict(flags)
+    for flag, key in (("save", "save_report"), ("show", "show_report"),
+                      ("html", "html_report"), ("open", "open_report")):
+        if merged.get(flag) is None:
+            merged[flag] = _as_bool(config.get(key))
+    if merged.get("analysts") is None and config.get("default_analysts"):
+        merged["analysts"] = str(config["default_analysts"])
+    return merged
+
+
 def run_analysis(checkpoint: bool | None = None, portfolio=None, flags=None):
-    flags = flags or {}
+    flags = flags_with_config_defaults(flags or {}, DEFAULT_CONFIG)
     # With no terminal nothing can answer a prompt: name every question still
     # open before any model is called, rather than stopping at the first one.
     if not (sys.stdin and sys.stdin.isatty()):
@@ -407,6 +440,7 @@ def run_analysis(checkpoint: bool | None = None, portfolio=None, flags=None):
 
     saved_to = _offer_reports(final_state, graph, selections["ticker"],
                               save=flags.get("save"), show=flags.get("show"), html=flags.get("html"),
+                              open_page=flags.get("open"),
                               trade_date=selections.get("analysis_date"),
                               usage_markdown=render_markdown(usage),
                               vote_markdown=render_vote(vote) if vote else None)
@@ -539,10 +573,11 @@ def _graphical_browser():
     return browser
 
 
-def _open_page(page: Path) -> None:
-    """Offer to open the saved page in a browser window, and say where it is if opening fails."""
+def _open_page(page: Path, ask: bool = True) -> None:
+    """Open the saved page in a browser window (asking first unless ``ask`` is False);
+    say where it is if opening fails."""
     browser = _graphical_browser()
-    if browser is None or not _yes("Open it in your browser?"):
+    if browser is None or (ask and not _yes("Open it in your browser?")):
         return
     try:
         opened = browser.open(page.as_uri())
@@ -553,7 +588,7 @@ def _open_page(page: Path) -> None:
 
 
 def _offer_reports(final_state, graph, ticker, save=None, show=None, html=None, trade_date=None,
-                   usage_markdown=None, vote_markdown=None):
+                   usage_markdown=None, vote_markdown=None, open_page=None):
     """Save the report tree and show it; ``save``/``show``/``html`` answer the questions when given.
 
     Returns the folder the report was saved in, or None when it was not saved.
@@ -596,7 +631,9 @@ def _offer_reports(final_state, graph, ticker, save=None, show=None, html=None, 
         if saved and html:
             page = (save_path / "complete_report.html").resolve()
             console.print(f"  [dim]HTML report:[/dim] {page.name}")
-            if asked:
+            if open_page:
+                _open_page(page, ask=False)
+            elif open_page is None and asked:
                 _open_page(page)
 
     if show is None:

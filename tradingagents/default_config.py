@@ -29,6 +29,12 @@ _ENV_OVERRIDES = {
     # currency label shown with them.
     "TRADINGAGENTS_DROP_UNSETTLED_BAR":   "drop_unsettled_bar",
     "TRADINGAGENTS_VOTE_RUNS":            "vote_runs",
+    # Answers to the CLI's questions, so a run asks fewer of them (true/false).
+    "TRADINGAGENTS_SAVE_REPORT":          "save_report",
+    "TRADINGAGENTS_SHOW_REPORT":          "show_report",
+    "TRADINGAGENTS_HTML_REPORT":          "html_report",
+    "TRADINGAGENTS_OPEN_REPORT":          "open_report",
+    "TRADINGAGENTS_ANALYSTS":             "default_analysts",
     "TRADINGAGENTS_MODEL_PRICES":         "model_prices",
     "TRADINGAGENTS_PRICE_CURRENCY":       "price_currency",
     # Data volume fed to the analysts (fewer articles, fewer input tokens).
@@ -159,6 +165,14 @@ def build_default_config() -> dict:
         # the majority rating is the decision (see tradingagents/vote.py); the
         # cost grows with it.
         "vote_runs": 1,
+        # Answers to the CLI's questions (None: ask). save/show/html/open take
+        # true/false; default_analysts is a comma list such as
+        # "market,sentiment,news,fundamentals". Command-line flags still win.
+        "save_report": None,
+        "show_report": None,
+        "html_report": None,
+        "open_report": None,
+        "default_analysts": None,
         # Checkpoint/resume: when True, LangGraph saves state after each node
         # so a crashed run can resume from the last successful step.
         "checkpoint_enabled": False,
