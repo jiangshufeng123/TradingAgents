@@ -42,12 +42,16 @@ from tradingagents.dataflows.vendors.stocktwits import fetch_stocktwits_messages
 
 def _a_share_money_flow(ticker: str, start_date: str, end_date: str) -> str:
     """The A-share money-flow table for the window, or "" (other markets, or no data)."""
-    try:
-        from tradingagents.dataflows.vendors.akshare_cn import fund_flow_lines
+    from tradingagents.dataflows.vendors.akshare_cn import fund_flow_lines, market_of
 
-        return "\n".join(fund_flow_lines(ticker, start_date, end_date))
-    except Exception:   # an optional source never stops the sentiment report
+    found = market_of(ticker)
+    if found is None or found[0] == "hk":
         return ""
+    try:
+        return "\n".join(fund_flow_lines(ticker, start_date, end_date)) or (
+            "A-share money flow: no rows in this window.")
+    except Exception as exc:   # an optional source never stops the sentiment report
+        return f"A-share money flow: <unavailable: {type(exc).__name__}>"
 
 
 def _seven_days_back(trade_date: str) -> str:

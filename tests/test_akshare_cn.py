@@ -237,3 +237,16 @@ def test_a_comparative_period_counts_from_its_statutory_deadline_not_sinas_later
     out = cn.get_income_statement("600519.SS", "quarterly", "2026-06-01")
     assert "2025-06-30" in out                     # public by 2025-08-31 at the latest
     assert "2025-08-31" in out and "2026-06-30" not in out
+
+
+@pytest.mark.unit
+def test_sentiment_says_when_a_share_money_flow_is_unavailable(monkeypatch):
+    from tradingagents.agents.analysts import sentiment_analyst as sa
+
+    def down(*a, **k):
+        raise VendorUnavailableError("push2his reset")
+
+    monkeypatch.setattr(cn, "fund_flow_lines", down)
+    assert "unavailable" in sa._a_share_money_flow("600519.SS", "2026-10-07", TODAY)
+    assert sa._a_share_money_flow("0700.HK", "2026-10-07", TODAY) == ""
+    assert sa._a_share_money_flow("NVDA", "2026-10-07", TODAY) == ""
