@@ -20,7 +20,7 @@ import re
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from server import db, procs
@@ -310,4 +310,58 @@ def run_screen(job: Job, user: User, config: dict, should_stop) -> dict:
             "source": universe.attrs.get("source"), "rows": rows}
 
 
-RUNNERS = {"analysis": run_analysis, "screen": run_screen}
+def review_rows(screen: Job, rows: list[int] | None, top: int | None) -> list[dict]:
+    """The screen's rows to review: the row numbers given (from 1), else its top ``top``."""
+    found = ((screen.result or {}).get("rows") or [])
+    if rows:
+        return [found[n - 1] for n in rows if 1 <= n <= len(found) and found[n - 1].get("ticker")]
+    return [r for r in found if r.get("ticker")][:max(1, min(int(top or 5), 10))]
+
+
+def run_review(job: Job, user: User, config: dict, should_stop) -> dict:
+    """A quick second look at a screen's leaders (tradingagents/review.py)."""
+    from tradingagents import review
+    from tradingagents.dataflows.config import run_config
+    from tradingagents.dataflows.vendors import akshare_cn
+    from tradingagents.llm_clients import create_tier_client
+    from tradingagents.usage import parse_prices
+
+    log = job_log(job.id)
+
+    def note(msg: str) -> None:
+        with open(log, "a", encoding="utf-8") as f:
+            f.write(f"{datetime.now():%H:%M:%S} {msg}\n")
+
+    with db.session() as s:
+        screen = s.get(Job, int(job.params["screen_job"]))
+        if screen is None or screen.user_id != user.id or screen.kind != "screen" or screen.status != "done":
+            raise RuntimeError("the screen to review is gone or not finished")
+        rows = review_rows(screen, job.params.get("rows"), job.params.get("top"))
+        result = screen.result or {}
+    if not rows:
+        raise RuntimeError("no stock to review")
+    note(f"reviewing {len(rows)}: " + ", ".join(f"{r['ticker']} {r.get('name') or ''}" for r in rows))
+    if should_stop():
+        raise Cancelled()
+    model = config.get("quick_think_llm") or ""
+    price = parse_prices(config.get("model_prices")).get(model)
+
+    def news(ticker, start, end):
+        with run_config(config):
+            return akshare_cn.get_news(ticker, start, end)
+
+    ranking = result.get("conditions", "").splitlines()[-2:] if result.get("conditions") else []
+    with run_config(config):
+        llm = create_tier_client(config, "quick").get_llm()
+    reviews = review.review(rows, llm, news=news, ranking="；".join(ranking), price=price)
+    for r in reviews:
+        note(f"{r['ticker']}: {r.get('verdict') or r.get('error')}")
+    currency = config.get("price_currency") or ""
+    runs = [{"ticker": r["ticker"], "rating": r.get("verdict") or "", "cost": r.get("cost"), "currency": currency,
+             "llm_calls": 1 if "verdict" in r else 0, "input_tokens": r.get("input_tokens") or 0,
+             "output_tokens": r.get("output_tokens") or 0, "trade_date": date.today().isoformat()}
+            for r in reviews]
+    return {"screen_job": int(job.params["screen_job"]), "model": model, "reviews": reviews, "runs": runs}
+
+
+RUNNERS = {"analysis": run_analysis, "screen": run_screen, "review": run_review}

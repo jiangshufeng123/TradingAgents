@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from server.models import Job
@@ -13,11 +14,47 @@ ACTIVE = ("queued", "running", "cancelling")
 FINAL = ("done", "failed", "cancelled")
 
 
+# Jobs that get a number people can quote: YYMMDD of the day the job was created and that
+# day's sequence across all accounts, two digits ("26101601", "26101602"...; a 100th screen
+# in one day gets three). Stored, so it never changes once given.
+SERIAL_KINDS = ("screen",)
+
+
+def next_serial(s: Session, day) -> str:
+    prefix = day.strftime("%y%m%d")
+    used = s.scalars(select(Job.serial).where(Job.serial.like(prefix + "%"))).all()
+    n = max((int(x[6:]) for x in used if x and x[6:].isdigit()), default=0) + 1
+    return f"{prefix}{n:02d}"
+
+
 def create(s: Session, user_id: int, kind: str, params: dict) -> Job:
     job = Job(user_id=user_id, kind=kind, params=params, status="queued")
-    s.add(job)
-    s.flush()
+    if kind not in SERIAL_KINDS:
+        s.add(job)
+        s.flush()
+        return job
+    job.created_at = datetime.now()
+    for attempt in range(5):               # two screens started at once: the second takes the next number
+        job.serial = next_serial(s, job.created_at)
+        try:
+            with s.begin_nested():
+                s.add(job)
+                s.flush()
+            return job
+        except IntegrityError:
+            if attempt == 4:
+                raise
     return job
+
+
+def backfill_serials(s: Session) -> int:
+    """Number the screens made before numbers existed, in the order they were created."""
+    old = list(s.scalars(select(Job).where(Job.kind.in_(SERIAL_KINDS), Job.serial.is_(None))
+                         .order_by(Job.created_at, Job.id)))
+    for job in old:
+        job.serial = next_serial(s, job.created_at or datetime.now())
+        s.flush()
+    return len(old)
 
 
 def start(s: Session, job: Job, log_path: str | None = None) -> None:

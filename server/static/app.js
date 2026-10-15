@@ -11,7 +11,7 @@ async function refreshActive() {
   try {
     const list = await api("/jobs?limit=50");
     const live = list.filter(j => ["queued", "running", "cancelling"].includes(j.status));
-    store.active = { analysis: live.filter(j => j.kind === "analysis").length, screen: live.filter(j => j.kind === "screen").length };
+    store.active = { analysis: live.filter(j => j.kind === "analysis").length, screen: live.filter(j => j.kind === "screen" || j.kind === "review").length };
   } catch (e) { /* the next poll tries again */ }
 }
 
@@ -138,10 +138,15 @@ function duration(a, b) {
   return (s / 3600).toFixed(1) + " 小时";
 }
 const STATUS = { queued: "排队中", running: "运行中", cancelling: "正在停止", done: "已完成", failed: "失败", cancelled: "已取消" };
-const KIND = { analysis: "分析", screen: "选股" };
+const KIND = { analysis: "分析", screen: "选股", review: "复核" };
+// A screen's number (YYMMDD + that day's sequence, given by the server); "#id" for anything else.
+const jobNo = j => (j && j.serial) || "#" + (j && j.id);
 const jobTitle = j => j.kind === "screen"
-  ? `选股：${j.params.request || "按条件筛选"}`
+  ? `选股${j.serial ? " " + j.serial : ""}：${j.params.request || (j.params.preset ? "策略" : "按条件筛选")}`
+  : j.kind === "review" ? `快速复核 ${(j.params.tickers || []).map(withName).join("、")}`
   : `分析 ${(j.params.tickers || []).map(withName).join("、")}`;
+// Where a job is shown: a screen and its reviews on the screen page, an analysis on its own.
+const jobHref = j => j.kind === "screen" ? "#/screen/" + j.id : j.kind === "review" ? "#/screen/" + j.params.screen_job : "#/jobs/" + j.id;
 
 const FIELDS = {
   price: ["最新价", "元"], chg_pct: ["今日涨跌", "%"], turnover_pct: ["换手率", "%"], volume_ratio: ["量比", ""],
@@ -361,7 +366,7 @@ const OverviewView = {
       return out;
     });
     const reportUrl = d => d.job_id != null && d.index != null ? `/api/jobs/${d.job_id}/report/${d.index}` : `/api/report?dir=${encodeURIComponent(d.report_dir)}`;
-    return { data, balance, cny, spendShare, activeByKind, reportUrl, KIND, when, pct, numf, money, actionName, jobTitle, duration, go };
+    return { data, balance, cny, spendShare, activeByKind, reportUrl, KIND, when, pct, numf, money, actionName, jobTitle, jobHref, duration, go };
   },
   template: `<div class="page">
     <div class="page-head">
@@ -391,9 +396,9 @@ const OverviewView = {
         <section class="section" v-if="data && data.recent_jobs.length">
           <h2>最近任务</h2>
           <div class="panel table-wrap"><table class="t"><tbody>
-            <tr v-for="j in data.recent_jobs" :key="j.id" style="cursor:pointer" @click="go('jobs/' + j.id)">
+            <tr v-for="j in data.recent_jobs" :key="j.id" style="cursor:pointer" @click="location.hash = jobHref(j)">
               <td style="width:92px"><StatusTag :status="j.status"/></td>
-              <td><a :href="'#/jobs/' + j.id" @click.stop>{{ jobTitle(j) }}</a>
+              <td><a :href="jobHref(j)" @click.stop>{{ jobTitle(j) }}</a>
                 <div v-if="j.progress" class="muted small">第 {{ j.progress.index }}/{{ j.progress.total }} 只：{{ withName(j.progress.ticker) }}<template v-if="j.progress.step">，{{ j.progress.step }}</template></div></td>
               <td class="r muted small hide-s">{{ when(j.created_at) }}</td>
               <td class="r num small" style="width:90px">{{ j.cost == null ? '' : '¥' + money(j.cost) }}</td>
@@ -439,6 +444,30 @@ const ScreenView = {
   setup() {
     const request = ref(""), job = ref(null), busy = ref(false), picked = ref(new Set()), spec = ref(null);
     const presets = ref([]), preset = ref("");
+    const reviews = ref([]), reviewTop = ref(5), reviewBusy = ref(false);
+    let reviewTimer;
+    async function loadReviews(id) {
+      clearTimeout(reviewTimer);
+      try { reviews.value = await api(`/screens/${id}/reviews`); } catch (e) { reviews.value = []; }
+      if (reviews.value.some(r => ["queued", "running", "cancelling"].includes(r.status)))
+        reviewTimer = setTimeout(() => job.value && loadReviews(job.value.id), 3000);
+    }
+    // Newest review of each ticker wins.
+    const reviewed = computed(() => {
+      const out = {};
+      for (const j of reviews.value) for (const r of ((j.result && j.result.reviews) || [])) if (!(r.ticker in out)) out[r.ticker] = r;
+      return out;
+    });
+    const reviewing = computed(() => reviews.value.find(r => ["queued", "running", "cancelling"].includes(r.status)));
+    const lastReviewFailed = computed(() => reviews.value.length && reviews.value[0].status === "failed"
+      ? String(reviews.value[0].error || "").split(/\r?\n/)[0] : "");
+    async function startReview() {
+      reviewBusy.value = true;
+      const rows = [...picked.value].sort((a, b) => a - b).slice(0, 10);
+      try { await api(`/screens/${job.value.id}/review`, { method: "POST", body: rows.length ? { rows } : { top: reviewTop.value } });
+            toast(rows.length ? `开始复核已选的 ${rows.length} 只` : `开始复核前 ${reviewTop.value} 名`); loadReviews(job.value.id); }
+      catch (e) { fail(e); } finally { reviewBusy.value = false; }
+    }
     const presetName = k => (presets.value.find(p => p.key === k) || {}).name || k;
     const history = ref([]);
     let timer;
@@ -449,6 +478,7 @@ const ScreenView = {
       try {
         job.value = await api("/jobs/" + id);
         picked.value = new Set();
+        reviews.value = []; if (job.value.status === "done") loadReviews(id);
         spec.value = job.value.result && job.value.result.spec ? JSON.parse(JSON.stringify(job.value.result.spec)) : null;
         if (["queued", "running", "cancelling"].includes(job.value.status)) poll(id);
       } catch (e) { fail(e); }
@@ -460,7 +490,7 @@ const ScreenView = {
           const j = await api("/jobs/" + id);
           job.value = j;
           if (!["queued", "running", "cancelling"].includes(j.status)) {
-            clearInterval(timer); loadHistory();
+            clearInterval(timer); loadHistory(); if (j.status === "done") loadReviews(id);
             spec.value = j.result && j.result.spec ? JSON.parse(JSON.stringify(j.result.spec)) : null;
             if (j.status === "failed") toast("选股没有完成：" + (j.error || ""), "err");
           }
@@ -511,11 +541,11 @@ const ScreenView = {
       loadHistory(); if (store.route.arg) open(store.route.arg);
       api("/screens/presets").then(r => { presets.value = r.presets; }).catch(() => {});
     });
-    onUnmounted(() => clearInterval(timer));
+    onUnmounted(() => { clearInterval(timer); clearTimeout(reviewTimer); });
     const fieldList = Object.entries(FIELDS);
     return { request, job, busy, picked, spec, history, rows, allPicked, fieldList, FIELDS, OPS, presets, preset,
-             presetName, setPreset, ranking, weightsOf,
-             start, rerun, addCond, setOp, toggle, toggleAll, addPicked, open, numf, when, jobTitle };
+             presetName, setPreset, ranking, weightsOf, reviews, reviewTop, reviewBusy, reviewed, reviewing, lastReviewFailed, startReview, withName,
+             start, rerun, addCond, setOp, toggle, toggleAll, addPicked, open, numf, when, jobTitle, jobNo };
   },
   template: `<div class="page">
     <div class="page-head"><div><h1>选股</h1><p>先按条件在全市场 A 股里筛选，再按价值、质量、成长、动量、低波动、流动性六类因子综合打分排序。结果不会自动加入自选股。</p></div></div>
@@ -536,7 +566,7 @@ const ScreenView = {
 
     <section class="section" v-if="job">
       <div class="row" style="justify-content:space-between;margin-bottom:12px">
-        <h2>{{ job.params.request || (job.params.preset ? '策略：' + presetName(job.params.preset) : '按条件筛选') }}</h2><StatusTag :status="job.status"/>
+        <h2>{{ job.params.request || (job.params.preset ? '策略：' + presetName(job.params.preset) : '按条件筛选') }}<span class="muted small num job-no">任务编号 {{ jobNo(job) }}</span></h2><StatusTag :status="job.status"/>
       </div>
       <div v-if="['queued','running','cancelling'].includes(job.status)" class="note">正在下载全市场行情、筛选并打分；排在前面的股票还要取日线算波动和中期动量，通常需要 30 秒到 2 分钟。</div>
       <div v-if="job.status === 'failed'" class="note err">{{ job.error }}</div>
@@ -577,6 +607,29 @@ const ScreenView = {
             这些指标今天的数据源没有提供，相关条件不会命中任何股票：{{ job.result.unavailable.map(f => FIELDS[f] ? FIELDS[f][0] : f).join('、') }}</div>
         </div>
 
+        <div v-if="rows.length" class="panel panel-body" style="margin-top:16px">
+          <div class="row" style="justify-content:space-between;gap:12px;flex-wrap:wrap">
+            <div><h3>快速复核</h3><p class="muted small">每只股票用快速模型看一遍数据和近三周新闻，给出“关注 / 观望 / 回避”和理由。只是完整分析前的初筛，不是评级，每只约几分钱。</p></div>
+            <div class="row" style="gap:8px">
+              <template v-if="!picked.size"><label class="check small">前 <select class="input" style="min-height:30px;width:auto" v-model.number="reviewTop"><option v-for="n in [3, 5, 10]" :key="n" :value="n">{{ n }}</option></select> 名</label></template>
+              <button class="btn small" type="button" @click="startReview" :disabled="reviewBusy || !!reviewing">{{ reviewing ? '正在复核…' : picked.size ? '复核已选的 ' + Math.min(picked.size, 10) + ' 只' : '开始复核' }}</button>
+            </div>
+          </div>
+          <div v-if="reviewing" class="note" style="margin-top:12px">正在复核 {{ (reviewing.params.tickers || []).length }} 只，通常 20–60 秒。</div>
+          <div v-if="lastReviewFailed" class="note err" style="margin-top:12px">上次复核没有完成：{{ lastReviewFailed }}</div>
+          <div v-if="Object.keys(reviewed).length" class="reviews">
+            <article v-for="(r, t) in reviewed" :key="t" class="review">
+              <header><Tk :t="t"/><span v-if="r.verdict" class="verdict" :class="'v-' + r.verdict">{{ r.verdict }}</span><span v-else class="verdict v-err">失败</span></header>
+              <template v-if="r.verdict">
+                <p v-if="r.thesis">{{ r.thesis }}</p>
+                <ul v-if="r.risks && r.risks.length" class="risks"><li v-for="(x, i) in r.risks" :key="i">{{ x }}</li></ul>
+                <p v-if="r.watch" class="muted small">跟踪：{{ r.watch }}</p>
+                <p class="muted small">{{ r.news_items ? '参考了 ' + r.news_items + ' 条新闻' : '没有取到新闻，只看了数据' }}</p>
+              </template>
+              <p v-else class="muted small">{{ r.error }}</p>
+            </article>
+          </div>
+        </div>
         <p v-if="rows.length" class="muted small" style="margin-top:16px">综合分 0–100，越高越好。“因子”列的六根小柱依次是：价值、质量、成长、动量、低波动、流动性（各自在同行业里的排名，越高越好）；蓝色是本次排序计入的因子。鼠标停在上面可看具体分数。</p>
         <div class="panel table-wrap" style="margin-top:8px">
           <table class="t wide" v-if="rows.length">
@@ -586,7 +639,7 @@ const ScreenView = {
               <th class="r">市净率</th><th class="r">市值（亿）</th><th class="r">ROE 年化</th><th class="r">营收同比</th><th class="r">净利同比</th></tr></thead>
             <tbody><tr v-for="(r, i) in rows" :key="i" :class="picked.has(i + 1) && 'picked'" @click="r.ticker && toggle(i + 1)" style="cursor:pointer">
               <td @click.stop><input type="checkbox" :disabled="!r.ticker" :checked="picked.has(i + 1)" @change="toggle(i + 1)" :aria-label="'选择 ' + r.name"></td>
-              <td class="muted num">{{ i + 1 }}</td><td class="num">{{ r.ticker || '—' }}</td><td>{{ r.name }}</td>
+              <td class="muted num">{{ i + 1 }}</td><td class="num">{{ r.ticker || '—' }}</td><td>{{ r.name }}<span v-if="reviewed[r.ticker] && reviewed[r.ticker].verdict" class="verdict sm" :class="'v-' + reviewed[r.ticker].verdict">{{ reviewed[r.ticker].verdict }}</span></td>
               <td class="r num"><b>{{ r.score == null ? '—' : Math.round(r.score) }}</b></td><td><FactorBars :row="r" :weights="weightsOf"/></td>
               <td class="muted">{{ r.industry || '—' }}</td>
               <td class="r num">{{ numf(r.price) }}</td><td class="r num" :class="r.chg_pct > 0 ? 'up' : r.chg_pct < 0 ? 'down' : ''">{{ r.chg_pct == null ? '—' : (r.chg_pct > 0 ? '+' : '') + numf(r.chg_pct) + '%' }}</td>
@@ -597,6 +650,7 @@ const ScreenView = {
         </div>
         <div class="actionbar" v-if="picked.size">
           <span>已选 {{ picked.size }} 只</span>
+          <button class="btn" @click="startReview" :disabled="reviewBusy || !!reviewing">快速复核</button>
           <button class="btn" @click="addPicked">加入自选股</button>
         </div>
       </template>
@@ -604,8 +658,10 @@ const ScreenView = {
 
     <section class="section" v-if="history.length">
       <h2>最近的选股</h2>
-      <div class="panel table-wrap"><table class="t"><tbody>
-        <tr v-for="h in history" :key="h.id" style="cursor:pointer" @click="open(h.id)">
+      <div class="panel table-wrap"><table class="t">
+        <thead><tr><th>任务编号</th><th>状态</th><th>内容</th><th class="r">时间</th></tr></thead><tbody>
+        <tr v-for="h in history" :key="h.id" style="cursor:pointer" :class="{ picked: job && job.id === h.id }" @click="open(h.id)">
+          <td class="num nowrap"><a :href="'#/screen/' + h.id" @click.stop.prevent="open(h.id)">{{ jobNo(h) }}</a></td>
           <td style="width:92px"><StatusTag :status="h.status"/></td><td>{{ h.params.request || (h.params.preset ? '策略：' + presetName(h.params.preset) : '按条件筛选') }}</td><td class="r muted small when">{{ when(h.created_at) }}</td></tr>
       </tbody></table></div>
     </section>
@@ -1124,7 +1180,11 @@ const ScoreView = {
       return `${t.getMonth() + 1}月${t.getDate()}日`;
     });
     const right = r => r.direction_right === "yes" ? "对" : r.direction_right === "no" ? "错" : "—";
-    return { data, error, o, firstSettle, right, signed, pct, tone, ratingName, when };
+    // Strategy rows open to show every pick, by screening day.
+    const opened = ref({});
+    const toggle = k => { opened.value = { ...opened.value, [k]: !opened.value[k] }; };
+    const mmdd = d => d ? d.slice(5).replace("-", "月") + "日" : "";
+    return { data, error, o, firstSettle, right, signed, pct, tone, ratingName, when, opened, toggle, mmdd, jobNo };
   },
   template: `<div class="page">
     <div class="page-head"><div><h1>成绩单</h1><p>分析决策和选股策略的事后表现，都与同市场基准相比。所有账户共用同一份记录。</p></div></div>
@@ -1177,23 +1237,46 @@ const ScoreView = {
         <p class="muted small" style="margin-bottom:10px">每次选股记下前 10 名，5 个和 20 个交易日后对比沪深300（从选股当天收盘价算起）。每个交易日 17:40 自动更新。</p>
         <div v-if="!data.screens.strategies.length" class="panel board-empty"><p>还没有记录。到"选股"页跑一次，前 10 名会从当天开始计时。</p></div>
         <div v-else class="panel table-wrap"><table class="t">
-          <thead><tr><th>策略</th><th class="r">记录</th><th class="r">5 日已检验</th><th class="r">5 日平均超额</th><th class="r">5 日跑赢指数</th>
-            <th class="r">20 日已检验</th><th class="r">20 日平均超额</th><th class="r">20 日跑赢指数</th></tr></thead>
-          <tbody><tr v-for="r in data.screens.strategies" :key="r.strategy">
-            <td>{{ r.name }}<div class="muted small num">{{ r.first }}<template v-if="r.last !== r.first"> 至 {{ r.last }}</template></div></td>
-            <td class="r num">{{ r.picks }}</td>
-            <td class="r num">{{ r.checked_5 }}</td><td class="r num" :class="tone(r.excess_5)">{{ signed(r.excess_5) }}</td><td class="r num">{{ r.beat_5 == null ? '—' : pct(r.beat_5, 0) }}</td>
-            <td class="r num">{{ r.checked_20 }}</td><td class="r num" :class="tone(r.excess_20)">{{ signed(r.excess_20) }}</td><td class="r num">{{ r.beat_20 == null ? '—' : pct(r.beat_20, 0) }}</td>
-          </tr></tbody></table></div>
-        <p v-if="data.screens.pending" class="muted small" style="margin-top:8px">还有 <b class="num">{{ data.screens.pending }}</b> 个入选股票没满 5 个交易日。样本少的时候数字波动很大，至少攒几十个再下结论。</p>
-        <details v-if="data.screens.recent.length" style="margin-top:12px"><summary class="small">最近检验的入选股票（{{ data.screens.recent.length }}）</summary>
-          <div class="panel table-wrap" style="margin-top:8px"><table class="t">
-            <thead><tr><th>选股日</th><th>策略</th><th>股票</th><th class="r">名次</th><th class="r">5 日涨跌</th><th class="r">同期指数</th><th class="r">20 日涨跌</th><th class="r">同期指数</th></tr></thead>
-            <tbody><tr v-for="r in data.screens.recent" :key="r.as_of + r.strategy + r.ticker">
-              <td class="num when">{{ r.as_of }}</td><td>{{ r.label }}</td><td><Tk :t="r.ticker"/></td><td class="r num">{{ r.rank }}</td>
-              <td class="r num" :class="tone(r.ret_5)">{{ signed(r.ret_5) }}</td><td class="r num muted">{{ signed(r.bench_5) }}</td>
-              <td class="r num" :class="tone(r.ret_20)">{{ signed(r.ret_20) }}</td><td class="r num muted">{{ signed(r.bench_20) }}</td>
-            </tr></tbody></table></div></details>
+          <thead><tr><th>策略</th><th class="r sm-hide">记录</th><th class="r sm-hide">5 日已检验</th><th class="r">5 日平均超额</th><th class="r sm-hide">5 日跑赢指数</th>
+            <th class="r sm-hide">20 日已检验</th><th class="r">20 日平均超额</th><th class="r sm-hide">20 日跑赢指数</th></tr></thead>
+          <tbody><template v-for="r in data.screens.strategies" :key="r.strategy">
+            <tr class="strat-row" :class="{ open: opened[r.strategy] }" @click="toggle(r.strategy)">
+              <td><button type="button" class="disclose" :aria-expanded="!!opened[r.strategy]" :aria-controls="'strat-' + r.strategy" @click.stop="toggle(r.strategy)">{{ r.name }}</button>
+                <div class="muted small num"><span class="nowrap">{{ r.first }}</span><template v-if="r.last !== r.first"> 至 <span class="nowrap">{{ r.last }}</span></template><span class="sm-only">，{{ r.picks }} 只</span></div></td>
+              <td class="r num sm-hide">{{ r.picks }}</td>
+              <td class="r num sm-hide">{{ r.checked_5 }}</td><td class="r num" :class="tone(r.excess_5)">{{ signed(r.excess_5) }}<div class="sm-only muted small">跑赢 {{ r.beat_5 == null ? '—' : pct(r.beat_5, 0) }}</div></td><td class="r num sm-hide">{{ r.beat_5 == null ? '—' : pct(r.beat_5, 0) }}</td>
+              <td class="r num sm-hide">{{ r.checked_20 }}</td><td class="r num" :class="tone(r.excess_20)">{{ signed(r.excess_20) }}<div class="sm-only muted small">跑赢 {{ r.beat_20 == null ? '—' : pct(r.beat_20, 0) }}</div></td><td class="r num sm-hide">{{ r.beat_20 == null ? '—' : pct(r.beat_20, 0) }}</td>
+            </tr>
+            <tr v-if="opened[r.strategy]" class="strat-detail" :id="'strat-' + r.strategy"><td colspan="8">
+              <div v-for="d in r.days" :key="d.as_of" class="screen-day">
+                <div class="screen-day-head">
+                  <b class="num">{{ d.as_of }}</b>
+                  <span class="muted small" v-if="d.labels.length && (d.labels.length > 1 || d.labels[0] !== r.name)">{{ d.labels.join('、') }}</span>
+                  <span class="small">{{ d.picks.length }} 只</span>
+                  <span class="small" v-if="d.checked_5">5 日平均超额 <b class="num" :class="tone(d.excess_5)">{{ signed(d.excess_5) }}</b><span class="muted">（指数 {{ signed(d.bench_5) }}）</span></span>
+                  <span class="muted small" v-else>约 {{ mmdd(d.check_from) }}后开始检验</span>
+                  <span class="small" v-if="d.checked_20">20 日平均超额 <b class="num" :class="tone(d.excess_20)">{{ signed(d.excess_20) }}</b></span>
+                  <span class="small day-jobs" v-if="d.jobs && d.jobs.length">选股任务
+                    <template v-for="(j, i) in d.jobs" :key="j.id"><template v-if="i">、</template><a v-if="j.mine" class="num" :href="'#/screen/' + j.id" :title="'打开选股任务 ' + jobNo(j)" @click.stop>{{ jobNo(j) }}</a><span v-else class="num muted" title="其他账户的选股">{{ jobNo(j) }}</span></template>
+                  </span>
+                </div>
+                <table class="t sub">
+                  <thead><tr><th class="r">名次</th><th>股票</th><th class="sm-hide">选股任务</th><th class="r sm-hide">综合分</th><th class="r sm-hide">5 日涨跌</th><th class="r">5 日超额</th><th class="r sm-hide">20 日涨跌</th><th class="r">20 日超额</th></tr></thead>
+                  <tbody><tr v-for="p in d.picks" :key="p.ticker">
+                    <td class="r num">{{ p.rank }}</td><td><Tk :t="p.ticker"/><span v-if="p.job && d.jobs && d.jobs.length > 1" class="sm-only muted small num"> {{ jobNo({ id: p.job, serial: p.serial }) }}</span></td>
+                    <td class="num sm-hide"><a v-if="p.job && p.mine" :href="'#/screen/' + p.job" @click.stop>{{ jobNo({ id: p.job, serial: p.serial }) }}</a><span v-else-if="p.job" class="muted">{{ jobNo({ id: p.job, serial: p.serial }) }}</span><span v-else class="muted">—</span></td>
+                    <td class="r num sm-hide">{{ p.score == null ? '—' : Math.round(p.score) }}</td>
+                    <td class="r num sm-hide" :class="tone(p.ret_5)">{{ p.ret_5 == null ? '' : signed(p.ret_5) }}</td>
+                    <td class="r num" :class="tone(p.excess_5)" :title="p.ret_5 == null ? '' : '涨跌 ' + signed(p.ret_5) + '，指数 ' + signed(p.bench_5)">{{ p.excess_5 == null ? '' : signed(p.excess_5) }}<span v-if="p.excess_5 == null" class="muted small">待检验</span></td>
+                    <td class="r num sm-hide" :class="tone(p.ret_20)">{{ p.ret_20 == null ? '' : signed(p.ret_20) }}</td>
+                    <td class="r num" :class="tone(p.excess_20)" :title="p.ret_20 == null ? '' : '涨跌 ' + signed(p.ret_20) + '，指数 ' + signed(p.bench_20)">{{ p.excess_20 == null ? '' : signed(p.excess_20) }}<span v-if="p.excess_20 == null" class="muted small">待检验</span></td>
+                  </tr></tbody></table>
+              </div>
+              <p v-if="r.older_days" class="muted small">更早的 {{ r.older_days }} 个选股日没有列出。</p>
+            </td></tr>
+          </template></tbody></table></div>
+        <p class="muted small" style="margin-top:8px">点策略名展开，看每次选股入选的股票、来自哪个选股任务（编号可点开当次选股），以及各自的涨跌。超额＝该股涨跌减同期沪深300涨跌。同一天同一策略重复选到的股票只记一次，算在最早选到它的任务上。</p>
+        <p v-if="data.screens.pending" class="muted small" style="margin-top:4px">还有 <b class="num">{{ data.screens.pending }}</b> 个入选股票没满 5 个交易日。样本少的时候数字波动很大，至少攒几十个再下结论。</p>
       </section>
 
       <section class="section" v-if="data.pending.length"><h2>等待结算 <span class="muted num" style="font-weight:400">{{ data.pending.length }}</span></h2>

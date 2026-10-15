@@ -84,6 +84,8 @@ class Job(Base):
     result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     cost: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # The number people use for a screen: YYMMDD and that day's sequence ("26101603"); see jobs.py.
+    serial: Mapped[str | None] = mapped_column(String(12), nullable=True, unique=True, index=True)
 
 
 class CostEntry(Base):

@@ -1,7 +1,7 @@
 """Screens keep their top picks; the forward check says, per strategy, whether they beat the index."""
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 import pytest
@@ -67,6 +67,12 @@ def test_the_check_fills_returns_against_the_index_once_enough_sessions_traded(e
     assert row["name"] == "趋势动量" and row["picks"] == 3 and row["checked_5"] == 2
     assert row["beat_5"] == pytest.approx(0.5) and row["excess_5"] == pytest.approx(((0.05 - 0.01) + (-0.05 - 0.01)) / 2)
     assert out["pending"] == 1 and out["recent"][0]["ticker"] in {"UP.SS", "DOWN.SS"}
+    day = row["days"][0]                                                       # the details under the strategy
+    assert row["older_days"] == 0 and day["as_of"] == "2026-09-01" and day["check_from"] == "2026-09-08"
+    assert [p["ticker"] for p in day["picks"]] == ["UP.SS", "DOWN.SS", "NEW.SS"]
+    assert day["picks"][0]["excess_5"] == pytest.approx(0.04) and day["picks"][2]["excess_5"] is None
+    assert day["checked_5"] == 2 and day["excess_5"] == pytest.approx(-0.01) and day["bench_5"] == pytest.approx(0.01)
+    assert day["job"] is None                                                  # no screen job of the viewer's
     with db.session() as s:                                                    # too young: nothing to do
         screen_track.record(s, None, 1, _result(["X.SS"]), spec, "2026-10-14")
         assert screen_track.check(s, lambda t, d: (_ for _ in ()).throw(AssertionError("no fetch")),
@@ -101,3 +107,63 @@ def test_a_preset_screen_runs_without_the_model_and_keeps_its_picks(env, monkeyp
         kept = s.query(ScreenPick).order_by(ScreenPick.rank).all()
         assert [(p.ticker, p.strategy, p.as_of) for p in kept] == [
             ("600519.SS", "quality_growth", "2026-10-16"), ("000858.SZ", "quality_growth", "2026-10-16")]
+
+
+@pytest.mark.unit
+def test_review_job_reviews_the_chosen_rows_and_records_the_cost(env, monkeypatch):
+    from server import runner
+    from server.models import CostEntry
+    from server.services import jobs
+    from tradingagents.dataflows.vendors import akshare_cn
+    import tradingagents.llm_clients as llm_clients
+
+    rows = [{"ticker": "600519.SS", "name": "贵州茅台", "score": 80}, {"ticker": None, "name": "北交所某股"},
+            {"ticker": "000858.SZ", "name": "五粮液", "score": 70}]
+    with db.session() as s:
+        screen = jobs.create(s, 1, "screen", {"request": "x"})
+        jobs.finish(s, screen, {"rows": rows, "conditions": "- top 20"})
+        job = jobs.create(s, 1, "review", {"screen_job": screen.id, "rows": [], "top": 5})
+        user = s.get(User, 1)
+
+    class Client:
+        def get_llm(self):
+            from types import SimpleNamespace
+
+            return SimpleNamespace(invoke=lambda p: SimpleNamespace(
+                content='{"verdict": "回避", "thesis": "t", "risks": ["r"], "watch": "w"}',
+                usage_metadata={"input_tokens": 1000, "output_tokens": 100}))
+    monkeypatch.setattr(llm_clients, "create_tier_client", lambda config, tier, **k: Client())
+    monkeypatch.setattr(akshare_cn, "get_news", lambda t, s, e: "No news.")
+    out = runner.run_review(job, user, {**env, "model_prices": "deepseek-flash=2/8", "quick_think_llm": "deepseek-flash"},
+                            lambda: False)
+    assert [r["ticker"] for r in out["reviews"]] == ["600519.SS", "000858.SZ"]       # no code: skipped
+    assert {r["verdict"] for r in out["reviews"]} == {"回避"}
+    assert out["runs"][0]["cost"] == pytest.approx((1000 * 2 + 100 * 8) / 1e6) and out["runs"][0]["rating"] == "回避"
+    with db.session() as s:
+        assert runner.review_rows(s.get(Job, screen.id), [3, 2, 9], None) == [rows[2]]
+
+
+@pytest.mark.unit
+def test_the_details_link_only_the_viewers_own_screens_and_keep_the_newest_days(env):
+    from server.services import jobs
+
+    spec = screener.Spec.from_preset("balanced")
+    with db.session() as s:
+        users.create_user(s, "other", "other-pass-1")
+    with db.session() as s:
+        for i in range(screen_track.DETAIL_DAYS + 2):
+            screen_track.record(s, None, 2, _result([f"D{i}.SS"]), spec, (date(2026, 1, 1) + timedelta(days=i)).isoformat())
+        mine, theirs = s.query(ScreenPick).filter_by(ticker="D31.SS").one(), s.query(ScreenPick).filter_by(ticker="D30.SS").one()
+        own_job, their_job = jobs.create(s, 1, "screen", {}), jobs.create(s, 2, "screen", {})
+        mine.user_id, mine.job_id, theirs.job_id = 1, own_job.id, their_job.id
+        s.flush()
+        own_id, their_id, own_serial, their_serial = own_job.id, their_job.id, own_job.serial, their_job.serial
+        row = screen_track.summary(s, user_id=1)["strategies"][0]
+    assert len(row["days"]) == screen_track.DETAIL_DAYS and row["older_days"] == 2
+    assert row["days"][0]["as_of"] == "2026-02-01" and row["days"][0]["job"] == own_id and row["days"][1]["job"] is None
+    first, second = row["days"][0], row["days"][1]
+    assert first["own_jobs"] == [own_id] and first["picks"][0]["job"] == own_id and first["picks"][0]["mine"]
+    assert first["jobs"] == [{"id": own_id, "serial": own_serial, "mine": True}] and first["picks"][0]["serial"] == own_serial
+    assert second["jobs"] == [{"id": their_id, "serial": their_serial, "mine": False}] and second["own_jobs"] == []
+    assert not second["picks"][0]["mine"] and second["picks"][0]["serial"] == their_serial
+

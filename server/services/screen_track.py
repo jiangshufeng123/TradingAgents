@@ -13,7 +13,7 @@ measured from that day's close, not from the price seen on screen.
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 from sqlalchemy import select
@@ -114,12 +114,68 @@ def check(s: Session, load, today: date | None = None) -> int:
     return filled
 
 
-def summary(s: Session) -> dict:
+DETAIL_DAYS = 30          # screening days listed under a strategy, newest first
+
+
+def _mean(xs):
+    xs = [x for x in xs if x is not None]
+    return sum(xs) / len(xs) if xs else None
+
+
+def _pick_out(p: ScreenPick, user_id: int | None = None, serials: dict | None = None) -> dict:
+    out = {"rank": p.rank, "ticker": p.ticker, "score": p.score, "label": p.label, "job": p.job_id,
+           "serial": (serials or {}).get(p.job_id), "mine": user_id is not None and p.user_id == user_id}
+    for n in HORIZONS:
+        ret, bench = getattr(p, f"ret_{n}"), getattr(p, f"bench_{n}")
+        out[f"ret_{n}"], out[f"bench_{n}"] = ret, bench
+        out[f"excess_{n}"] = ret - bench if ret is not None and bench is not None else None
+    return out
+
+
+def details(mine: list[ScreenPick], user_id: int | None = None,
+            serials: dict | None = None) -> tuple[list[dict], int]:
+    """A strategy's picks grouped by screening day, newest first (at most ``DETAIL_DAYS``
+    days), and how many older days were left out. Each pick carries the screen job that kept
+    it (the first screen of that day and strategy to rank it), so a stock can be traced to its
+    screen by its number (``serial``, from ``serials``: job id -> number); ``jobs`` lists the
+    day's screen jobs ({id, serial, mine}), ``own_jobs`` the ids of those run by ``user_id``
+    (the page links to them; other accounts' screens are not theirs to open) and ``job`` the
+    newest of those."""
+    days: dict[str, list[ScreenPick]] = {}
+    for p in mine:
+        days.setdefault(p.as_of, []).append(p)
+    out = []
+    for as_of in sorted(days, reverse=True)[:DETAIL_DAYS]:
+        picks = sorted(days[as_of], key=lambda p: (p.rank, p.ticker))
+        own = sorted({p.job_id for p in picks if user_id is not None and p.user_id == user_id and p.job_id})
+        rows = [_pick_out(p, user_id, serials) for p in picks]
+        day = {"as_of": as_of, "labels": sorted({p.label for p in picks if p.label}),
+               "jobs": [{"id": j, "serial": (serials or {}).get(j), "mine": j in own}
+                        for j in sorted({p.job_id for p in picks if p.job_id})],
+               "own_jobs": own,
+               "job": own[-1] if own else None, "picks": rows,
+               "check_from": (date.fromisoformat(as_of) + timedelta(days=7)).isoformat()}
+        for n in HORIZONS:
+            done = [r for r in rows if r[f"excess_{n}"] is not None]
+            day[f"checked_{n}"] = len(done)
+            day[f"excess_{n}"] = _mean([r[f"excess_{n}"] for r in done])
+            day[f"ret_{n}"] = _mean([r[f"ret_{n}"] for r in done])
+            day[f"bench_{n}"] = done[0][f"bench_{n}"] if done else None
+        out.append(day)
+    return out, max(0, len(days) - DETAIL_DAYS)
+
+
+def summary(s: Session, user_id: int | None = None) -> dict:
     """Per strategy: picks kept, and for each horizon the checked count, average excess
-    return over the benchmark and the share that beat it; plus the latest checked picks."""
+    return over the benchmark and the share that beat it, with every pick by screening day
+    (``days``); plus the latest checked picks."""
     from tradingagents.scoring import PRESETS
 
+    from server.models import Job
+
     picks = list(s.scalars(select(ScreenPick)))
+    ids = {p.job_id for p in picks if p.job_id}
+    serials = dict(s.execute(select(Job.id, Job.serial).where(Job.id.in_(ids))).all()) if ids else {}
     order = list(PRESETS) + ["custom"]
     out = []
     for key in sorted({p.strategy for p in picks}, key=lambda k: order.index(k) if k in order else 99):
@@ -134,11 +190,12 @@ def summary(s: Session) -> dict:
             row[f"excess_{n}"] = sum(excess) / len(excess) if excess else None
             row[f"beat_{n}"] = sum(1 for x in excess if x > 0) / len(excess) if excess else None
             row[f"ret_{n}"] = sum(getattr(p, f"ret_{n}") for p in done) / len(done) if done else None
+        row["days"], row["older_days"] = details(mine, user_id, serials)
         out.append(row)
     recent = sorted((p for p in picks if p.ret_5 is not None), key=lambda p: (p.as_of, p.strategy, p.rank),
                     reverse=True)[:30]
     pending = sum(1 for p in picks if p.ret_5 is None)
     return {"strategies": out, "pending": pending, "horizons": list(HORIZONS), "benchmark": BENCHMARK,
-            "recent": [{"as_of": p.as_of, "strategy": p.strategy, "label": p.label, "rank": p.rank,
+            "recent": [{"as_of": p.as_of, "strategy": p.strategy, "label": p.label, "rank": p.rank, "job": p.job_id, "serial": serials.get(p.job_id),
                         "ticker": p.ticker, "score": p.score, "ret_5": p.ret_5, "bench_5": p.bench_5,
                         "ret_20": p.ret_20, "bench_20": p.bench_20} for p in recent]}

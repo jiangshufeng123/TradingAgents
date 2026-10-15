@@ -559,3 +559,22 @@ def test_low_balance_is_flagged(app, env, monkeypatch):
     assert out["low"] is True and out["alert_at"] == 20
     off = _client(create_app({**env, "balance_alert": 0}, start_worker=False, start_scheduler=False))
     assert off.get("/api/balance").json()["low"] is False
+
+
+@pytest.mark.unit
+def test_reviewing_a_screen(app, env):
+    ian = _client(app)
+    with db.session() as s:
+        screen = jobs.create(s, 1, "screen", {"request": "x"})
+        jobs.finish(s, screen, {"rows": [{"ticker": "600519.SS", "name": "贵州茅台"}, {"ticker": None, "name": "x"}]})
+        running = jobs.create(s, 1, "screen", {"request": "y"})
+    assert ian.post(f"/api/screens/{running.id}/review", json={}, headers=H).status_code == 409
+    assert ian.post(f"/api/screens/{screen.id}/review", json={"rows": [2]}, headers=H).status_code == 422
+    job = ian.post(f"/api/screens/{screen.id}/review", json={"top": 3}, headers=H).json()
+    assert job["kind"] == "review" and job["params"]["tickers"] == ["600519.SS"]
+    with db.session() as s:
+        jobs.finish(s, s.get(Job, job["id"]), {"reviews": [{"ticker": "600519.SS", "verdict": "关注"}]})
+    listed = ian.get(f"/api/screens/{screen.id}/reviews").json()
+    assert [j["id"] for j in listed] == [job["id"]] and listed[0]["result"]["reviews"][0]["verdict"] == "关注"
+    amy = _client(app, "amy", "user-pass-1")
+    assert amy.post(f"/api/screens/{screen.id}/review", json={}, headers=H).status_code == 404

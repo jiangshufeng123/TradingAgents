@@ -71,6 +71,11 @@ class ScreenIn(BaseModel):
     limit: int | None = Field(None, ge=1, le=200)
 
 
+class ReviewIn(BaseModel):
+    rows: list[int] = Field(default_factory=list, description="Row numbers (from 1); empty: the top ``top``")
+    top: int = Field(5, ge=1, le=10)
+
+
 class PickIn(BaseModel):
     rows: list[int] = Field(..., description="Row numbers in the screen's result, from 1")
 
@@ -138,7 +143,7 @@ def _user_out(u: User) -> dict:
 
 
 def _job_out(j: Job, detail: bool = False) -> dict:
-    out = {"id": j.id, "kind": j.kind, "status": j.status, "params": j.params,
+    out = {"id": j.id, "serial": j.serial, "kind": j.kind, "status": j.status, "params": j.params,
            "created_at": _iso(j.created_at), "started_at": _iso(j.started_at),
            "finished_at": _iso(j.finished_at), "cost": j.cost,
            "error": (j.error or "").split("\n\n")[0] or None}
@@ -602,7 +607,7 @@ def create_app(config: dict | None = None, *, start_worker: bool = True, start_s
 
         out = scoreboard_svc.payload(config)
         with db.session() as s:
-            out["screens"] = screen_track.summary(s)
+            out["screens"] = screen_track.summary(s, user.id)
         return out
 
     @app.get("/api/analyses/defaults")
@@ -667,6 +672,44 @@ def create_app(config: dict | None = None, *, start_worker: bool = True, start_s
             out = _job_out(job)
         _wake()
         return out
+
+    @app.post("/api/screens/{job_id}/review")
+    def screen_review(job_id: int, body: ReviewIn, user: User = Depends(current_user)):
+        """A quick second look at a finished screen's leaders: one quick-model call each."""
+        from server.runner import review_rows
+
+        with db.session() as s:
+            screen = _own_job(s, job_id, user)
+            if screen.kind != "screen" or screen.status != "done":
+                raise HTTPException(409, "not a finished screen")
+            rows = review_rows(screen, body.rows[:10], body.top)
+            if not rows:
+                raise HTTPException(422, "no reviewable stock in those rows")
+            est = _review_estimate(len(rows))
+            ok, _, why = costs.check_budget(s, s.get(User, user.id), est or 0.0, config)
+            if not ok:
+                raise HTTPException(402, why)
+            job = jobs.create(s, user.id, "review", {"screen_job": job_id, "rows": body.rows[:10], "top": body.top,
+                                                     "tickers": [r["ticker"] for r in rows], "estimate": est})
+            out = _job_out(job)
+        _wake()
+        return out
+
+    @app.get("/api/screens/{job_id}/reviews")
+    def screen_reviews(job_id: int, user: User = Depends(current_user)):
+        """The reviews of a screen, newest first (each a review job, finished or not)."""
+        with db.session() as s:
+            _own_job(s, job_id, user)
+            found = [j for j in jobs.recent(s, user.id, 200) if j.kind == "review"
+                     and int((j.params or {}).get("screen_job") or 0) == job_id]
+            return [{**_job_out(j), "result": j.result} for j in found]
+
+    def _review_estimate(n: int) -> float | None:
+        """About 3,000 tokens in and 800 out per stock, at the quick model's price."""
+        from tradingagents.usage import parse_prices
+
+        price = parse_prices(config.get("model_prices")).get(config.get("quick_think_llm") or "")
+        return None if price is None else round(n * (3000 * price[0] + 800 * price[1]) / 1_000_000, 4)
 
     @app.post("/api/screens/{job_id}/pick")
     def screen_pick(job_id: int, body: PickIn, user: User = Depends(current_user)):

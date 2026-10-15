@@ -60,7 +60,43 @@ def init_db(url: str | None = None):
 
     eng = engine(url)
     Base.metadata.create_all(eng)
+    upgrade(eng)
     return eng
+
+
+# Columns added after a table first shipped: create_all makes new tables but never alters an
+# existing one, so a database from an earlier version gets them here (portable SQL only).
+_ADDED_COLUMNS = [("jobs", "serial", "VARCHAR(12)", "CREATE UNIQUE INDEX IF NOT EXISTS ix_jobs_serial ON jobs (serial)")]
+
+
+def upgrade(eng) -> None:
+    """Bring a database made by an earlier version up to the current models; safe to repeat."""
+    from sqlalchemy import inspect, text
+
+    insp = inspect(eng)
+    with eng.begin() as conn:
+        for table, column, sql_type, index in _ADDED_COLUMNS:
+            if column not in {c["name"] for c in insp.get_columns(table)}:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}"))
+                if index:
+                    conn.execute(text(index))
+    from server.services import jobs
+
+    with _session_for(eng) as s:
+        jobs.backfill_serials(s)
+
+
+@contextmanager
+def _session_for(eng):
+    s = sessionmaker(bind=eng, expire_on_commit=False)()
+    try:
+        yield s
+        s.commit()
+    except Exception:
+        s.rollback()
+        raise
+    finally:
+        s.close()
 
 
 @contextmanager
