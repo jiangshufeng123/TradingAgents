@@ -444,6 +444,7 @@ def run_analysis(checkpoint: bool | None = None, portfolio=None, flags=None):
 
     rating = (vote or {}).get("rating") or run_rating(final_state)
     sizing = _compute_sizing(graph, selections, rating, portfolio)
+    _paper_order(graph, selections, rating)
 
     usage = summarize(stats_handler.usage, config)
     _print_usage(usage)
@@ -461,6 +462,30 @@ def run_analysis(checkpoint: bool | None = None, portfolio=None, flags=None):
         _save_run_reports(graph, run_states, selections["ticker"], saved_to)
     _record_cost(usage, graph, config, selections, final_state, saved_to, elapsed, vote, sizing)
     return {"ticker": selections["ticker"], "rating": rating, "sizing": sizing, "report_dir": saved_to}
+
+
+def _paper_order(graph, selections, rating):
+    """Queue the paper account's order for this decision, when paper trading is on."""
+    config = getattr(graph, "config", None) or {}
+    if not config.get("paper_trading") or not rating or is_review(rating):
+        return None
+    from tradingagents.paper import PaperAccount
+
+    try:
+        with run_config(graph.config):
+            account = PaperAccount(graph.config)
+            sizing = size_position(selections["ticker"], rating, selections["analysis_date"],
+                                   account.portfolio(), graph.config)
+            order = account.submit(sizing, selections["analysis_date"])
+    except Exception as e:   # the paper account never costs the user the run
+        console.print(f"[yellow]Paper order not placed: {e}[/yellow]")
+        return None
+    if order:
+        console.print(f"[bold]Paper order:[/bold] {order['side']} {order['qty']:,.0f} {order['ticker']} "
+                      f"at the next session's open (stop {order['stop']:,.4g})")
+    else:
+        console.print(f"[dim]Paper account: no trade for {selections['ticker']} ({sizing.action}).[/dim]")
+    return order
 
 
 def _compute_sizing(graph, selections, rating, portfolio):

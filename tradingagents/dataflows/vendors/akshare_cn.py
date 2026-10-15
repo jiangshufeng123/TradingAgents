@@ -145,13 +145,18 @@ def _with_timeout(func, kwargs, seconds: float):
     return box.get("value")
 
 
-def call(func_name: str, **kwargs) -> pd.DataFrame:
+def call(func_name: str, _timeout: float | None = None, _retries: int | None = None, **kwargs) -> pd.DataFrame:
     """``akshare.<func_name>(**kwargs)``, retried, and cached for a few minutes.
 
     Several analysts ask for the same table in one run; the cache keeps that to
     one request. Network failures are retried with a short backoff, then
     reported as the vendor being unavailable so the next vendor is tried.
+    ``_timeout`` / ``_retries`` override the defaults for a heavy, paged table:
+    a timed-out attempt keeps running in the background, so retrying one would
+    only download it twice at once and invite throttling.
     """
+    timeout = _timeout or CALL_TIMEOUT_SECONDS
+    retries = _retries or RETRIES
     key = (func_name, tuple(sorted(kwargs.items())))
     now = time.time()
     with _CACHE_LOCK:
@@ -160,13 +165,13 @@ def call(func_name: str, **kwargs) -> pd.DataFrame:
             return hit[1]
     func = getattr(_ak(), func_name)
     last = None
-    for attempt in range(RETRIES):
+    for attempt in range(retries):
         try:
-            df = _with_timeout(func, kwargs, CALL_TIMEOUT_SECONDS)
+            df = _with_timeout(func, kwargs, timeout)
             break
         except Exception as exc:   # network, upstream format or throttling
             last = exc
-            if attempt < RETRIES - 1:
+            if attempt < retries - 1:
                 time.sleep(1.5 * (attempt + 1))
     else:
         raise VendorUnavailableError(f"AkShare {func_name} failed: {type(last).__name__}: {str(last)[:200]}")

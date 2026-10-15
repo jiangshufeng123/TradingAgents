@@ -172,9 +172,53 @@ def _portfolio(path):
         raise typer.Exit(code=1) from None
 
 
+def _screen_picks(request: str, top: int) -> list[str]:
+    """The top picks of a plain-language screen, for an unattended daily run; [] on failure."""
+    from tradingagents import screener
+    from tradingagents.dataflows.config import run_config
+    from tradingagents.llm_clients import create_tier_client
+
+    try:
+        with run_config(DEFAULT_CONFIG):
+            universe, period = screener.build_universe(DEFAULT_CONFIG)
+        industries = sorted(universe["industry"].dropna().astype(str).unique()) if "industry" in universe else []
+        spec = screener.interpret(request, create_tier_client(DEFAULT_CONFIG, "quick").get_llm(),
+                                  industries, period, universe.attrs.get("missing", []))
+        spec.limit = max(spec.limit, top)
+        with run_config(DEFAULT_CONFIG):
+            result = screener.apply(spec, universe)
+        screener.save(result, spec, request, DEFAULT_CONFIG)
+    except Exception as exc:   # the watchlist still runs
+        console.print(f"[yellow]Daily screen failed ({exc}); analyzing the watchlist only.[/yellow]")
+        return []
+    picks = list(result["ticker"].dropna().head(top))
+    console.print(f"[bold]Daily screen[/bold] ({request}): {spec.explanation or ''}\n{spec.describe()}\n"
+                  f"→ {len(result)} candidate(s) saved, none added to the watchlist. "
+                  f"Review and pick with: tradingagents watchlist pick")
+    return picks
+
+
+def _tickers_from_file(path: str) -> list[str]:
+    """Tickers from a text file (one per line) or a CSV with a ``ticker`` column."""
+    from pathlib import Path
+
+    text = Path(path).expanduser().read_text(encoding="utf-8-sig")
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.startswith("#")]
+    if lines and "," in lines[0]:
+        header = [h.strip().lower() for h in lines[0].split(",")]
+        if "ticker" in header:
+            i = header.index("ticker")
+            return [row.split(",")[i].strip().upper() for row in lines[1:] if row.split(",")[i].strip()]
+    return [ln.split(",")[0].strip().upper() for ln in lines]
+
+
 def _watchlist(tickers: str | None) -> list[str]:
-    text = tickers or DEFAULT_CONFIG.get("watchlist") or ""
-    return list(dict.fromkeys(t.strip().upper() for t in str(text).replace(";", ",").split(",") if t.strip()))
+    """The tickers given, else .env's TRADINGAGENTS_WATCHLIST plus watchlist.txt."""
+    if tickers:
+        return list(dict.fromkeys(t.strip().upper() for t in str(tickers).replace(";", ",").split(",") if t.strip()))
+    from tradingagents import watchlist as wl
+
+    return wl.tickers(DEFAULT_CONFIG)
 
 
 @app.command()
@@ -183,11 +227,21 @@ def daily(
         None, help="Comma-separated tickers; omit to use TRADINGAGENTS_WATCHLIST from .env"),
     date: str = typer.Option(None, "--date", help="Analysis date, YYYY-MM-DD; default today"),
     runs: int = typer.Option(None, "--runs", min=1, help="Runs per ticker (majority vote); default TRADINGAGENTS_VOTE_RUNS"),
+    from_file: str = typer.Option(
+        None, "--from-file",
+        help="Also analyze the tickers in this file (one per line, or a CSV with a ticker column), "
+             "e.g. the screens/latest.txt that `tradingagents screen` writes"),
 ):
     """Analyze every ticker on the watchlist, unattended, and log each decision for the scoreboard."""
     from datetime import date as _date
 
     names = _watchlist(tickers)
+    if from_file:
+        try:
+            names = list(dict.fromkeys(names + _tickers_from_file(from_file)))
+        except OSError as exc:
+            console.print(f"[red]Cannot read {from_file}: {exc}[/red]")
+            raise typer.Exit(code=1) from None
     if not names:
         console.print("[red]No tickers: pass them (e.g. NVDA,600519.SS) or set TRADINGAGENTS_WATCHLIST in .env[/red]")
         raise typer.Exit(code=1)
@@ -203,7 +257,20 @@ def daily(
             console.print(f"  {gap}")
         raise typer.Exit(code=1)
 
+    if DEFAULT_CONFIG.get("daily_screen") and not tickers:
+        # Candidates only: nothing joins the watchlist until you pick it
+        # (tradingagents watchlist pick).
+        _screen_picks(DEFAULT_CONFIG["daily_screen"], int(DEFAULT_CONFIG.get("daily_screen_top") or 20))
     book = _portfolio(None)
+    if DEFAULT_CONFIG.get("paper_trading"):
+        # Yesterday's orders fill at today's open before today's analyses size against the book.
+        try:
+            _, fills = _paper_account()
+            if fills:
+                console.print("[bold]Paper account fills:[/bold]")
+                _print_fills(fills)
+        except Exception as exc:
+            console.print(f"[yellow]Paper account update failed: {exc}[/yellow]")
     done, failed, results = [], [], []
     for index, ticker in enumerate(names, 1):
         console.rule(f"[bold cyan]{index}/{len(names)} {ticker} {base['date']}")
@@ -224,6 +291,18 @@ def daily(
     if book is None:
         console.print("[dim]No portfolio set (TRADINGAGENTS_PORTFOLIO): sizes are weights of equity, "
                       "not share counts.[/dim]")
+    if DEFAULT_CONFIG.get("paper_trading"):
+        try:
+            from datetime import date as _d
+
+            from tradingagents.dataflows.config import run_config
+            from tradingagents.paper import render_status
+
+            account, _ = _paper_account(update=False)
+            with run_config(DEFAULT_CONFIG):
+                console.print("\n" + render_status(account, _d.today().isoformat()))
+        except Exception as exc:
+            console.print(f"[yellow]Paper account summary failed: {exc}[/yellow]")
     for ticker, reason in failed:
         console.print(f"[yellow]failed:[/yellow] {ticker}: {reason}")
     console.print("Decisions are in the memory log; run [bold]tradingagents scoreboard[/bold] once they have settled.")
@@ -301,6 +380,318 @@ def risk(
             console.print(f"\n[bold]If the rating were {rating}:[/bold] {rk.summary_line(sizing)}")
             for warning in sizing.warnings:
                 console.print(f"  [yellow]•[/yellow] {warning}")
+
+
+@app.command()
+def screen(
+    request: str = typer.Argument(None, help='What to look for, in plain language, e.g. "市盈率低于20、ROE超过15%的消费股"'),
+    where: str = typer.Option(None, "--where", help='Conditions without the model, e.g. "pe<20, roe_annualized>15, mcap>100"'),
+    limit: int = typer.Option(None, "--limit", min=1, max=200, help="How many to keep (default 20)"),
+    yes: bool = typer.Option(False, "--yes", help="Run the interpreted conditions without asking"),
+    add: str = typer.Option(None, "--add", help='Rows to add to the watchlist without the picker, e.g. "1,3" or "1-3" or "all"'),
+    no_pick: bool = typer.Option(False, "--no-pick", help="Only show and save the results; add nothing"),
+):
+    """Screen every A-share: plain language becomes conditions you check, then code filters the market."""
+    from tradingagents import screener
+    from tradingagents.dataflows.config import run_config
+
+    if not request and not where:
+        console.print('[red]Say what to look for, e.g. tradingagents screen "低估值高ROE的白酒股", or use --where.[/red]')
+        raise typer.Exit(code=1)
+    with run_config(DEFAULT_CONFIG):
+        with console.status("[cyan]Loading every A-share's quote and latest results…[/cyan]"):
+            universe, period = screener.build_universe(DEFAULT_CONFIG)
+    if where:
+        spec = screener.parse_where(where)
+    else:
+        # Asked outside any spinner or run scope, the way scripts/probe_screen_llm.py
+        # does: a call made under the spinner was seen never to return on Windows.
+        from tradingagents.llm_clients import create_tier_client
+
+        industries = sorted(universe["industry"].dropna().astype(str).unique()) if "industry" in universe else []
+        llm = create_tier_client(DEFAULT_CONFIG, "quick").get_llm()
+        console.print(f"Asking {DEFAULT_CONFIG.get('quick_think_llm')} to turn the request into conditions "
+                      f"(usually 10-30 s)…")
+        spec = screener.interpret(request, llm, industries, period, universe.attrs.get("missing", []),
+                                  progress=lambda s: console.print(f"  … {s:.0f}s"))
+    with run_config(DEFAULT_CONFIG):
+        if limit:
+            spec.limit = limit
+        console.print(f"[dim]Quotes from {universe.attrs.get('source', '?')}; "
+                      f"{len(universe):,} A-shares; results from the {period} report.[/dim]")
+        gone = screener.unavailable(spec, universe)
+        if gone:
+            console.print(f"[yellow]Not available from today's source, so these match nothing: "
+                          f"{', '.join(gone)}[/yellow]")
+        console.print("[bold]Conditions:[/bold]")
+        if spec.explanation:
+            console.print(f"  {spec.explanation}")
+        console.print(spec.describe())
+        if not where and not yes and sys.stdin.isatty() and not typer.confirm("Run these conditions?", default=True):
+            raise typer.Exit()
+        result = screener.apply(spec, universe)
+    console.print("\n" + screener.render(result, spec, period))
+    if result.empty:
+        return
+    csv_path, latest = screener.save(result, spec, request or where, DEFAULT_CONFIG)
+    console.print(f"\n[dim]Saved:[/dim] {csv_path}")
+    if not no_pick:
+        _pick_into_watchlist(result, note=f"screen: {(request or where)[:40]}", rows=add)
+
+
+def _pick_into_watchlist(result, note: str, rows: str | None = None) -> list[str]:
+    """Ask which screened rows join the watchlist; add only those. Returns the tickers added."""
+    from tradingagents import watchlist as wl
+
+    if result is None or result.empty:
+        return []
+    labels = [f"{i}. {r['ticker']} {r.get('name', '')} | {r.get('industry') or '—'} | "
+              f"PE {_num(r.get('pe'))} | ROE {_num(r.get('roe_annualized'))}%"
+              for i, (_, r) in enumerate(result.iterrows(), 1)]
+    picks: list[int] = []
+    if rows is not None:
+        picks = wl.parse_picks(rows, len(result))
+    elif sys.stdin.isatty():
+        try:
+            import questionary
+
+            chosen = questionary.checkbox(
+                "Add which to the watchlist? (Space to tick, a = all, Enter to finish; none ticked adds nothing)",
+                choices=[questionary.Choice(label, value=i) for i, label in enumerate(labels)],
+            ).ask()
+            picks = list(chosen or [])
+        except Exception:   # no full console (e.g. some IDE terminals): type row numbers instead
+            while True:
+                text = typer.prompt("Add which rows to the watchlist? (e.g. 1,3 or 1-3, all; Enter adds none)",
+                                    default="", show_default=False)
+                try:
+                    picks = wl.parse_picks(text, len(result))
+                    break
+                except ValueError as exc:
+                    console.print(f"[yellow]{exc}[/yellow]")
+    if not picks:
+        console.print("[dim]Nothing added to the watchlist. Pick later with: tradingagents watchlist pick[/dim]")
+        return []
+    chosen = [result["ticker"].iloc[i] for i in picks]
+    added = wl.add(DEFAULT_CONFIG, chosen, note)
+    already = [t for t in chosen if t not in added]
+    if added:
+        console.print(f"[green]Added to the watchlist:[/green] {', '.join(added)}  ({wl.path(DEFAULT_CONFIG)})")
+    if already:
+        console.print(f"[dim]Already watched: {', '.join(already)}[/dim]")
+    if added and sys.stdin.isatty() and typer.confirm(
+            f"Analyze the {len(added)} added now? (about ¥2.5 each with 2 runs; otherwise the next daily run does it)",
+            default=False):
+        daily(tickers=",".join(added), date=None, runs=None, from_file=None)
+    return added
+
+
+def _num(v) -> str:
+    try:
+        return "—" if v is None or v != v else f"{float(v):.1f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+watch_app = typer.Typer(help="The watchlist daily analyzes: .env's TRADINGAGENTS_WATCHLIST plus watchlist.txt.")
+app.add_typer(watch_app, name="watchlist")
+
+
+@watch_app.command("list")
+def watchlist_list():
+    """Show every watched ticker and where it came from."""
+    from tradingagents import watchlist as wl
+
+    for t in wl.from_env(DEFAULT_CONFIG):
+        console.print(f"  {t}  [dim](.env TRADINGAGENTS_WATCHLIST)[/dim]")
+    for t, note in wl.entries(DEFAULT_CONFIG):
+        console.print(f"  {t}  [dim]({note or 'watchlist.txt'})[/dim]")
+    console.print(f"[dim]File: {wl.path(DEFAULT_CONFIG)}[/dim]")
+
+
+@watch_app.command("add")
+def watchlist_add(tickers: str = typer.Argument(..., help="Comma-separated tickers")):
+    """Add tickers to watchlist.txt."""
+    from tradingagents import watchlist as wl
+
+    added = wl.add(DEFAULT_CONFIG, [t for t in tickers.replace(";", ",").split(",") if t.strip()], "added by hand")
+    console.print(f"Added: {', '.join(added) or 'nothing new'}")
+
+
+@watch_app.command("remove")
+def watchlist_remove(tickers: str = typer.Argument(..., help="Comma-separated tickers")):
+    """Remove tickers from watchlist.txt (names in .env stay; edit .env for those)."""
+    from tradingagents import watchlist as wl
+
+    gone = wl.remove(DEFAULT_CONFIG, [t for t in tickers.replace(";", ",").split(",") if t.strip()])
+    console.print(f"Removed: {', '.join(gone) or 'none of those are in watchlist.txt'}")
+
+
+@watch_app.command("pick")
+def watchlist_pick(
+    file: str = typer.Option(None, "--file", help="A saved screen CSV (default: the latest in <reports>/screens)"),
+    add: str = typer.Option(None, "--add", help='Rows to add without the picker, e.g. "1,3"'),
+):
+    """Choose from a saved screen's results which tickers join the watchlist."""
+    from pathlib import Path
+
+    import pandas as pd
+
+    from tradingagents import screener
+
+    if file:
+        path = Path(file)
+    else:
+        base = Path(DEFAULT_CONFIG.get("reports_dir") or Path(DEFAULT_CONFIG["results_dir"]) / "reports").expanduser()
+        saved = sorted((base / "screens").glob("screen_*.csv"))
+        if not saved:
+            console.print("[yellow]No saved screen yet. Run: tradingagents screen \"…\"[/yellow]")
+            raise typer.Exit(code=1)
+        path = saved[-1]
+    result = pd.read_csv(path, encoding="utf-8-sig", dtype={"code": str})
+    console.print(f"[dim]{path}[/dim]\n")
+    console.print(screener.render(result, screener.Spec(), "saved"))
+    _pick_into_watchlist(result, note=f"screen {path.stem[7:]}", rows=add)
+
+
+paper_app = typer.Typer(help="The paper-trading account: simulated fills of the system's calls.")
+app.add_typer(paper_app, name="paper")
+
+
+def _paper_account(update: bool = True):
+    from tradingagents.dataflows.config import run_config
+    from tradingagents.paper import PaperAccount
+
+    with run_config(DEFAULT_CONFIG):
+        account = PaperAccount(DEFAULT_CONFIG)
+        fills = account.update() if update else []
+    return account, fills
+
+
+def _print_fills(fills) -> None:
+    for f in fills:
+        colour = "green" if f.status == "filled" else "yellow"
+        console.print(f"  [{colour}]{f.date} {f.side} {f.qty:,.0f} {f.ticker} @ {f.price:,.4g} "
+                      f"({f.status}: {f.reason})[/{colour}]")
+
+
+@paper_app.command("status")
+def paper_status():
+    """Fill due orders, run the stops, and show the account."""
+    from datetime import date as _date
+
+    from tradingagents.dataflows.config import run_config
+    from tradingagents.paper import render_status
+
+    account, fills = _paper_account()
+    if fills:
+        console.print("[bold]New fills:[/bold]")
+        _print_fills(fills)
+    with run_config(DEFAULT_CONFIG):
+        console.print(render_status(account, _date.today().isoformat()))
+    console.print(f"\n[dim]Files:[/dim] {account.dir}")
+
+
+@paper_app.command("reset")
+def paper_reset(
+    cash: float = typer.Option(None, "--cash", help="Starting cash (default: TRADINGAGENTS_PAPER_CASH)"),
+    currency: str = typer.Option(None, "--currency", help="Account currency (default: CNY)"),
+    yes: bool = typer.Option(False, "--yes", help="Do not ask for confirmation"),
+):
+    """Start the paper account over (old trades and equity files are kept, renamed)."""
+    from tradingagents.paper import PaperAccount
+
+    account = PaperAccount(DEFAULT_CONFIG)
+    cash = cash or float(DEFAULT_CONFIG.get("paper_cash") or 1_000_000)
+    currency = currency or DEFAULT_CONFIG.get("paper_currency") or "CNY"
+    if not yes and not typer.confirm(f"Reset the paper account to {cash:,.0f} {currency}?"):
+        raise typer.Exit()
+    account.reset(cash, currency)
+    console.print(f"Paper account reset: {cash:,.0f} {currency.upper()} in {account.dir}")
+
+
+schedule_app = typer.Typer(help="Run the daily analysis on a schedule (Windows Task Scheduler).")
+app.add_typer(schedule_app, name="schedule")
+
+TASK_NAME = "TradingAgents Daily"
+
+
+def _project_dir():
+    from pathlib import Path
+
+    return Path(__file__).resolve().parents[1]
+
+
+def _schtasks(*args) -> tuple[int, str]:
+    import subprocess
+
+    done = subprocess.run(["schtasks", *args], capture_output=True, text=True)
+    return done.returncode, (done.stdout or "") + (done.stderr or "")
+
+
+def _on_windows() -> bool:
+    return sys.platform == "win32"
+
+
+@schedule_app.command("install")
+def schedule_install(
+    time_of_day: str = typer.Option("18:30", "--time", help="Local time, HH:MM"),
+    days: str = typer.Option("MON,TUE,WED,THU,FRI", "--days", help="Days, e.g. MON,TUE,WED,THU,FRI"),
+    name: str = typer.Option(TASK_NAME, "--name", help="Task name"),
+):
+    """Create (or replace) the task that runs scripts/run_daily.ps1: paper fills, daily analysis, scoreboard."""
+    script = _project_dir() / "scripts" / "run_daily.ps1"
+    command = f'powershell -NoProfile -ExecutionPolicy Bypass -File "{script}"'
+    if not _on_windows():
+        hh, mm = time_of_day.split(":")
+        console.print("Not Windows: add this line with `crontab -e` instead:\n"
+                      f"{int(mm)} {int(hh)} * * {days} cd {_project_dir()} && tradingagents daily && tradingagents scoreboard")
+        return
+    code, out = _schtasks("/Create", "/F", "/TN", name, "/SC", "WEEKLY", "/D", days.upper(), "/ST", time_of_day,
+                          "/TR", command)
+    console.print(out.strip())
+    if code != 0:
+        raise typer.Exit(code=code)
+    console.print(f"[green]Scheduled:[/green] {name}, {days.upper()} at {time_of_day}. Logs go to "
+                  f"{_project_dir() / 'logs'}. The computer must be on and you logged in at that time.")
+
+
+@schedule_app.command("list")
+def schedule_list(name: str = typer.Option(TASK_NAME, "--name", help="Task name")):
+    """Show the task's next and last run and its result (0 means success)."""
+    if not _on_windows():
+        console.print("Not Windows: see `crontab -l`.")
+        return
+    code, out = _schtasks("/Query", "/TN", name, "/V", "/FO", "LIST")
+    if code != 0:
+        console.print(f"[yellow]No task named {name!r}.[/yellow] Create it with: tradingagents schedule install")
+        raise typer.Exit(code=1)
+    keep = ("TaskName", "Next Run Time", "Last Run Time", "Last Result", "Status", "Task To Run", "Days",
+            "Start Time", "任务名", "下次运行时间", "上次运行时间", "上次结果", "状态", "要运行的任务", "天", "开始时间")
+    lines = [ln for ln in out.splitlines() if ln.split(":", 1)[0].strip() in keep]
+    console.print("\n".join(lines) or out)
+
+
+@schedule_app.command("remove")
+def schedule_remove(name: str = typer.Option(TASK_NAME, "--name", help="Task name")):
+    """Delete the scheduled task."""
+    if not _on_windows():
+        console.print("Not Windows: remove the line with `crontab -e`.")
+        return
+    code, out = _schtasks("/Delete", "/TN", name, "/F")
+    console.print(out.strip())
+    raise typer.Exit(code=code)
+
+
+@schedule_app.command("run")
+def schedule_run(name: str = typer.Option(TASK_NAME, "--name", help="Task name")):
+    """Start the scheduled task now (it runs in the background; see logs/)."""
+    if not _on_windows():
+        console.print("Not Windows: run scripts/run_daily.ps1 or `tradingagents daily` directly.")
+        return
+    code, out = _schtasks("/Run", "/TN", name)
+    console.print(out.strip())
+    raise typer.Exit(code=code)
 
 
 if __name__ == "__main__":

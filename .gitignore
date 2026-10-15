@@ -227,3 +227,5 @@ logs/
 
 # Your own holdings (copy portfolio.example.json)
 portfolio.json
+# Tickers you picked into the watchlist
+watchlist.txt

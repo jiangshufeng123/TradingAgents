@@ -37,6 +37,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_ANALYSTS":             "default_analysts",
     # Tickers for `tradingagents daily`, comma-separated.
     "TRADINGAGENTS_WATCHLIST":            "watchlist",
+    "TRADINGAGENTS_WATCHLIST_FILE":       "watchlist_file",
     "TRADINGAGENTS_PORTFOLIO":            "portfolio_path",
     "TRADINGAGENTS_RISK_CONTEXT":         "risk_context",
     "TRADINGAGENTS_RISK_PER_TRADE":       "risk_per_trade",
@@ -46,6 +47,13 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_LOT_SIZES":            "lot_sizes",
     "TRADINGAGENTS_LEARN_BELIEFS":        "learn_beliefs",
     "TRADINGAGENTS_RESEARCH_STYLES":      "research_styles",
+    "TRADINGAGENTS_PAPER_TRADING":        "paper_trading",
+    "TRADINGAGENTS_PAPER_CASH":           "paper_cash",
+    "TRADINGAGENTS_PAPER_CURRENCY":       "paper_currency",
+    "TRADINGAGENTS_PAPER_DIR":            "paper_dir",
+    "TRADINGAGENTS_PAPER_BENCHMARK":      "paper_benchmark",
+    "TRADINGAGENTS_DAILY_SCREEN":         "daily_screen",
+    "TRADINGAGENTS_DAILY_SCREEN_TOP":     "daily_screen_top",
     "TRADINGAGENTS_BELIEF_UPDATE_EVERY":  "belief_update_every",
     "TRADINGAGENTS_MODEL_PRICES":         "model_prices",
     "TRADINGAGENTS_PRICE_CURRENCY":       "price_currency",
@@ -187,6 +195,9 @@ def build_default_config() -> dict:
         "default_analysts": None,
         # Tickers `tradingagents daily` analyzes, e.g. "NVDA,600519.SS,0700.HK".
         "watchlist": None,
+        # Tickers you picked (e.g. from a screen), added to the watchlist above;
+        # default watchlist.txt in the project folder (tradingagents/watchlist.py).
+        "watchlist_file": None,
         # Position sizing and risk, computed in code (tradingagents/risk.py).
         # portfolio_path: JSON with cash and positions (see portfolio.example.json),
         # used by analyze and daily when --portfolio is not given.
@@ -208,6 +219,18 @@ def build_default_config() -> dict:
         # momentum (plus policy for A-share/HK listings); a comma list picks
         # styles; "off" removes the panel. Each style is one quick-model call.
         "research_styles": None,
+        # Paper trading (tradingagents/paper.py): every analysis's rating is sized
+        # against a simulated account and filled at the next session's open.
+        "paper_trading": False,
+        "paper_cash": 1_000_000.0,
+        "paper_currency": "CNY",
+        "paper_dir": None,               # default <reports_dir>/paper
+        "paper_benchmark": "000300.SS",  # CSI 300
+        # `tradingagents daily` can first screen the market in plain language
+        # (tradingagents/screener.py) and save the candidates for you to review;
+        # nothing joins the watchlist until you pick it (`tradingagents watchlist pick`).
+        "daily_screen": None,            # e.g. "低估值、ROE高于15%的大盘股"
+        "daily_screen_top": 20,          # candidates kept
         "belief_update_every": 5,
         # Checkpoint/resume: when True, LangGraph saves state after each node
         # so a crashed run can resume from the last successful step.
