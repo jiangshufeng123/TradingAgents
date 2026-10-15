@@ -80,6 +80,10 @@ class PickIn(BaseModel):
     rows: list[int] = Field(..., description="Row numbers in the screen's result, from 1")
 
 
+class TrackIn(BaseModel):
+    track: bool = Field(..., description="Whether the screen's top picks count on the scoreboard")
+
+
 class ScheduleIn(BaseModel):
     enabled: bool
     time_of_day: str = "18:30"
@@ -728,6 +732,18 @@ def create_app(config: dict | None = None, *, start_worker: bool = True, start_s
             added = watchlist.add(s, user.id, tickers, note=f"screen #{job_id}: {job.params.get('request', '')}"[:200],
                                   source="screen")
         return {"added": added, "already": [t for t in tickers if t not in added], "no_symbol": no_symbol}
+
+    @app.post("/api/screens/{job_id}/track")
+    def screen_track_set(job_id: int, body: TrackIn, user: User = Depends(current_user)):
+        """Switch a screen on or off for the scoreboard's strategy figures (on by default)."""
+        from server.services import screen_track
+
+        with db.session() as s:
+            job = _own_job(s, job_id, user)
+            if job.kind != "screen":
+                raise HTTPException(409, "not a screen")
+            kept = screen_track.set_tracked(s, job, body.track)
+            return {"track": body.track, "kept": kept, "status": job.status}
 
     # --- schedule ---------------------------------------------------------------------
 

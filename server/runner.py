@@ -296,8 +296,13 @@ def run_screen(job: Job, user: User, config: dict, should_stop) -> dict:
         from server.services import screen_track
 
         with db.session() as s:
-            kept = screen_track.record(s, job.id, user.id, result, spec, universe.attrs.get("as_of"),
-                                       label=request[:60] if request.strip() else "")
+            current = s.get(Job, job.id)          # the switch may have been turned while it ran
+            if current is not None and not screen_track.tracked(current):
+                kept = None
+                note("not added to the scoreboard (switched off)")
+            else:
+                kept = screen_track.record(s, job.id, user.id, result, spec, universe.attrs.get("as_of"),
+                                           label=request[:60] if request.strip() else "")
         if kept:
             note(f"kept the top {kept} for the forward check (5 and 20 trading days)")
     except Exception as exc:
@@ -307,7 +312,7 @@ def run_screen(job: Job, user: User, config: dict, should_stop) -> dict:
     return {"request": request, "conditions": spec.describe(), "explanation": spec.explanation or "",
             "spec": dataclasses.asdict(spec), "ranking": spec.ranking(),
             "unavailable": screener.unavailable(spec, universe), "period": period,
-            "source": universe.attrs.get("source"), "rows": rows}
+            "source": universe.attrs.get("source"), "as_of": universe.attrs.get("as_of"), "rows": rows}
 
 
 def review_rows(screen: Job, rows: list[int] | None, top: int | None) -> list[dict]:

@@ -407,10 +407,6 @@ details > summary { cursor: pointer; color: var(--action); }
 .t tr.strat-row.open td { border-bottom-color: transparent; background: var(--surface-2); }
 .t tr.strat-detail > td { background: var(--surface-2); padding: 4px 12px 14px; }
 .t tr.strat-detail:hover { background: none; }
-.screen-day + .screen-day { margin-top: 14px; }
-.screen-day-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px; padding: 6px 0 8px; }
-.screen-day-head .day-jobs { margin-left: auto; }
-.screen-day-head a { padding: 0; }
 .t.sub { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; border-collapse: separate; border-spacing: 0; }
 .t.sub th, .t.sub td { padding: 7px 10px; white-space: nowrap; }
 .nowrap { white-space: nowrap; }
@@ -420,6 +416,34 @@ details > summary { cursor: pointer; color: var(--action); }
   .sm-only { display: inline; }
   div.sm-only { display: block; }
   .t tr.strat-detail > td { padding: 4px 8px 12px; }
-  .screen-day-head .day-jobs { margin-left: 0; }
 }
 .job-no { font-weight: 400; margin-left: 10px; white-space: nowrap; }
+
+/* scoreboard: a strategy's screen jobs, each opening to its picks */
+.screen-job { border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.screen-job + .screen-job { margin-top: 8px; }
+.screen-job-head { width: 100%; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; padding: 10px 12px;
+  background: none; border: 0; font: inherit; color: var(--ink); text-align: left; cursor: pointer; border-radius: 8px; }
+.screen-job-head:hover { background: var(--surface-2); }
+.screen-job-head:focus-visible { outline: 2px solid var(--action); outline-offset: -2px; }
+.disclose-mark { width: 0; height: 0; border-left: 5px solid var(--muted); border-top: 4px solid transparent; border-bottom: 4px solid transparent; transition: transform .15s; align-self: center; }
+.screen-job.open .disclose-mark { transform: rotate(90deg); border-left-color: var(--action); }
+.sj-no { font-weight: 600; }
+.sj-what { flex: 1 1 260px; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.sj-cond { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.screen-job.open .sj-cond { white-space: normal; }
+.sj-fig { white-space: nowrap; }
+.screen-job-body { padding: 0 12px 12px; }
+.sj-meta { margin: 0 0 8px; display: flex; flex-wrap: wrap; gap: 4px 12px; }
+.sj-meta a { padding: 0; }
+
+/* on/off switch (role="switch") */
+.t td.c, .t th.c { text-align: center; }
+.switch { position: relative; width: 38px; height: 22px; border-radius: 11px; border: 1px solid var(--field-border); background: var(--surface-2);
+  cursor: pointer; padding: 0; vertical-align: middle; transition: background .15s, border-color .15s; }
+.switch span { position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: var(--muted); transition: transform .15s, background .15s; }
+.switch[aria-checked="true"] { background: var(--action); border-color: var(--action); }
+.switch[aria-checked="true"] span { transform: translateX(16px); background: var(--on-fill, #fff); }
+.switch:disabled { opacity: .45; cursor: not-allowed; }
+.switch:focus-visible { outline: 2px solid var(--action); outline-offset: 2px; }
+@media (max-width: 640px) { div.sm-only.hist-sub { display: flex; align-items: center; gap: 8px; margin-top: 4px; } }

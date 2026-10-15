@@ -131,10 +131,11 @@ class AuthSession(Base):
 class ScreenPick(Base):
     """A stock a screen ranked near the top, kept to check later how it did (screen_track.py).
 
-    One row per trading day, strategy and stock, whoever ran the screen and however often:
-    a stock picked twice the same day by the same strategy counts once."""
+    One row per screen job and stock: each screen keeps its own list (two screens of a
+    strategy the same day may differ in their extra conditions). The strategy's figures
+    count a stock picked twice the same day once."""
     __tablename__ = "screen_picks"
-    __table_args__ = (UniqueConstraint("as_of", "strategy", "ticker"),)
+    __table_args__ = (UniqueConstraint("job_id", "ticker", name="uq_screen_picks_job_ticker"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     job_id: Mapped[int | None] = mapped_column(ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True)
     user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)

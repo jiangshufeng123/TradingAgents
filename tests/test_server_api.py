@@ -578,3 +578,22 @@ def test_reviewing_a_screen(app, env):
     assert [j["id"] for j in listed] == [job["id"]] and listed[0]["result"]["reviews"][0]["verdict"] == "关注"
     amy = _client(app, "amy", "user-pass-1")
     assert amy.post(f"/api/screens/{screen.id}/review", json={}, headers=H).status_code == 404
+
+
+@pytest.mark.unit
+def test_switching_a_screen_on_and_off_for_the_scoreboard(app, env):
+    from server.models import ScreenPick
+
+    ian = _client(app)
+    with db.session() as s:
+        screen = jobs.create(s, 1, "screen", {"request": ""})
+        jobs.finish(s, screen, {"spec": {"preset": "balanced"}, "source": "Tushare (2026-10-16 close)",
+                                "rows": [{"ticker": "600519.SS", "score": 80}, {"ticker": "000858.SZ", "score": 70}]})
+    out = ian.post(f"/api/screens/{screen.id}/track", json={"track": False}, headers=H).json()
+    assert out == {"track": False, "kept": 0, "status": "done"}
+    assert ian.get(f"/api/jobs/{screen.id}").json()["params"]["track"] is False
+    assert ian.post(f"/api/screens/{screen.id}/track", json={"track": True}, headers=H).json()["kept"] == 2
+    with db.session() as s:
+        assert {p.ticker for p in s.query(ScreenPick).filter_by(job_id=screen.id)} == {"600519.SS", "000858.SZ"}
+    amy = _client(app, "amy", "user-pass-1")
+    assert amy.post(f"/api/screens/{screen.id}/track", json={"track": False}, headers=H).status_code == 404

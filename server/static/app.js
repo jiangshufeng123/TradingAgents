@@ -170,6 +170,22 @@ const FactorBars = {
     <span v-for="x in items" :key="x.k" class="fb" :class="x.on && 'on'"><i :style="{ height: (x.v == null ? 0 : Math.max(4, x.v)) + '%' }"></i></span></span>`,
 };
 const OPS = [[">", "大于"], [">=", "不低于"], ["<", "小于"], ["<=", "不高于"], ["between", "介于"]];
+// A screen's conditions in one line ("市盈率 < 20倍，ROE（年化）≥ 15%，行业：银行"): what tells
+// two screens of the same strategy apart.
+const OP_SIGN = { ">": ">", ">=": "≥", "<": "<", "<=": "≤", "==": "=" };
+function specBrief(spec) {
+  if (!spec) return "";
+  const parts = (spec.filters || []).map(f => {
+    const [name, unit] = FIELDS[f.field] || [f.field, ""];
+    const v = f.op === "between" ? `${f.value[0]}～${f.value[1]}` : f.value;
+    return f.op === "between" ? `${name} ${v}${unit}` : `${name} ${OP_SIGN[f.op] || f.op} ${v}${unit}`;
+  });
+  if ((spec.industries || []).length) parts.push("行业：" + spec.industries.join("、"));
+  if ((spec.exclude_industries || []).length) parts.push("排除行业：" + spec.exclude_industries.join("、"));
+  if (spec.exclude_st === false) parts.push("含 ST");
+  if ((spec.sort || []).length) parts.push("按" + spec.sort.map(s => (FIELDS[s.field] || [s.field])[0] + (s.desc === false ? "从低到高" : "从高到低")).join("、") + "排序");
+  return parts.join("，");
+}
 
 // --- icons (18px, 1.6 stroke) ----------------------------------------------------------
 const ICON = {
@@ -474,6 +490,20 @@ const ScreenView = {
     async function loadHistory() {
       try { history.value = (await api("/jobs?limit=30")).filter(j => j.kind === "screen").slice(0, 8); } catch (e) { fail(e); }
     }
+    // The scoreboard switch of a screen (on unless switched off).
+    const trackBusy = ref(null);
+    const tracked = h => !h.params || h.params.track !== false;
+    const canTrack = h => !["failed", "cancelled"].includes(h.status);
+    async function toggleTrack(h) {
+      const on = !tracked(h);
+      trackBusy.value = h.id;
+      try {
+        const r = await api(`/screens/${h.id}/track`, { method: "POST", body: { track: on } });
+        h.params = { ...(h.params || {}), track: on };
+        if (job.value && job.value.id === h.id) job.value.params = { ...job.value.params, track: on };
+        toast(on ? (h.status === "done" ? `${jobNo(h)} 已计入成绩单（${r.kept} 只）` : `${jobNo(h)} 完成后会计入成绩单`) : `${jobNo(h)} 已从成绩单去掉`);
+      } catch (e) { fail(e); } finally { trackBusy.value = null; }
+    }
     async function open(id) {
       try {
         job.value = await api("/jobs/" + id);
@@ -545,7 +575,8 @@ const ScreenView = {
     const fieldList = Object.entries(FIELDS);
     return { request, job, busy, picked, spec, history, rows, allPicked, fieldList, FIELDS, OPS, presets, preset,
              presetName, setPreset, ranking, weightsOf, reviews, reviewTop, reviewBusy, reviewed, reviewing, lastReviewFailed, startReview, withName,
-             start, rerun, addCond, setOp, toggle, toggleAll, addPicked, open, numf, when, jobTitle, jobNo };
+             start, rerun, addCond, setOp, toggle, toggleAll, addPicked, open, numf, when, jobTitle, jobNo,
+             trackBusy, tracked, canTrack, toggleTrack };
   },
   template: `<div class="page">
     <div class="page-head"><div><h1>选股</h1><p>先按条件在全市场 A 股里筛选，再按价值、质量、成长、动量、低波动、流动性六类因子综合打分排序。结果不会自动加入自选股。</p></div></div>
@@ -659,11 +690,17 @@ const ScreenView = {
     <section class="section" v-if="history.length">
       <h2>最近的选股</h2>
       <div class="panel table-wrap"><table class="t">
-        <thead><tr><th>任务编号</th><th>状态</th><th>内容</th><th class="r">时间</th></tr></thead><tbody>
+        <thead><tr><th>任务编号</th><th class="sm-hide">状态</th><th>内容</th><th class="c"><span class="sm-hide">计入成绩单</span><span class="sm-only">计入</span></th><th class="r sm-hide">时间</th></tr></thead><tbody>
         <tr v-for="h in history" :key="h.id" style="cursor:pointer" :class="{ picked: job && job.id === h.id }" @click="open(h.id)">
           <td class="num nowrap"><a :href="'#/screen/' + h.id" @click.stop.prevent="open(h.id)">{{ jobNo(h) }}</a></td>
-          <td style="width:92px"><StatusTag :status="h.status"/></td><td>{{ h.params.request || (h.params.preset ? '策略：' + presetName(h.params.preset) : '按条件筛选') }}</td><td class="r muted small when">{{ when(h.created_at) }}</td></tr>
+          <td style="width:92px" class="sm-hide"><StatusTag :status="h.status"/></td><td>{{ h.params.request || (h.params.preset ? '策略：' + presetName(h.params.preset) : '按条件筛选') }}
+            <div class="sm-only hist-sub"><StatusTag :status="h.status"/><span class="muted small">{{ when(h.created_at) }}</span></div></td><td class="c" @click.stop>
+            <button type="button" role="switch" class="switch" :aria-checked="canTrack(h) && tracked(h)" :disabled="!canTrack(h) || trackBusy === h.id"
+              :title="!canTrack(h) ? '这次选股没有结果，不能计入' : tracked(h) ? '已计入成绩单的选股策略成绩，点一下取消' : '没有计入成绩单，点一下计入'"
+              :aria-label="'选股任务 ' + jobNo(h) + ' 计入成绩单'" @click="toggleTrack(h)"><span></span></button></td>
+          <td class="r muted small when sm-hide">{{ when(h.created_at) }}</td></tr>
       </tbody></table></div>
+      <p class="muted small" style="margin-top:8px">“计入成绩单”打开时，这次选股的前 10 名会记入成绩单的选股策略成绩，之后按 5 日、20 日检验；关掉就从成绩单里去掉。新选股默认打开。</p>
     </section>
   </div>`,
 };
@@ -1184,7 +1221,7 @@ const ScoreView = {
     const opened = ref({});
     const toggle = k => { opened.value = { ...opened.value, [k]: !opened.value[k] }; };
     const mmdd = d => d ? d.slice(5).replace("-", "月") + "日" : "";
-    return { data, error, o, firstSettle, right, signed, pct, tone, ratingName, when, opened, toggle, mmdd, jobNo };
+    return { data, error, o, firstSettle, right, signed, pct, tone, ratingName, when, opened, toggle, mmdd, jobNo, specBrief };
   },
   template: `<div class="page">
     <div class="page-head"><div><h1>成绩单</h1><p>分析决策和选股策略的事后表现，都与同市场基准相比。所有账户共用同一份记录。</p></div></div>
@@ -1248,34 +1285,45 @@ const ScoreView = {
               <td class="r num sm-hide">{{ r.checked_20 }}</td><td class="r num" :class="tone(r.excess_20)">{{ signed(r.excess_20) }}<div class="sm-only muted small">跑赢 {{ r.beat_20 == null ? '—' : pct(r.beat_20, 0) }}</div></td><td class="r num sm-hide">{{ r.beat_20 == null ? '—' : pct(r.beat_20, 0) }}</td>
             </tr>
             <tr v-if="opened[r.strategy]" class="strat-detail" :id="'strat-' + r.strategy"><td colspan="8">
-              <div v-for="d in r.days" :key="d.as_of" class="screen-day">
-                <div class="screen-day-head">
-                  <b class="num">{{ d.as_of }}</b>
-                  <span class="muted small" v-if="d.labels.length && (d.labels.length > 1 || d.labels[0] !== r.name)">{{ d.labels.join('、') }}</span>
-                  <span class="small">{{ d.picks.length }} 只</span>
-                  <span class="small" v-if="d.checked_5">5 日平均超额 <b class="num" :class="tone(d.excess_5)">{{ signed(d.excess_5) }}</b><span class="muted">（指数 {{ signed(d.bench_5) }}）</span></span>
-                  <span class="muted small" v-else>约 {{ mmdd(d.check_from) }}后开始检验</span>
-                  <span class="small" v-if="d.checked_20">20 日平均超额 <b class="num" :class="tone(d.excess_20)">{{ signed(d.excess_20) }}</b></span>
-                  <span class="small day-jobs" v-if="d.jobs && d.jobs.length">选股任务
-                    <template v-for="(j, i) in d.jobs" :key="j.id"><template v-if="i">、</template><a v-if="j.mine" class="num" :href="'#/screen/' + j.id" :title="'打开选股任务 ' + jobNo(j)" @click.stop>{{ jobNo(j) }}</a><span v-else class="num muted" title="其他账户的选股">{{ jobNo(j) }}</span></template>
+              <div v-for="d in r.jobs" :key="d.job || d.as_of" class="screen-job" :class="{ open: opened[r.strategy + ':' + (d.job || d.as_of)] }">
+                <button type="button" class="screen-job-head" :aria-expanded="!!opened[r.strategy + ':' + (d.job || d.as_of)]"
+                  @click="toggle(r.strategy + ':' + (d.job || d.as_of))">
+                  <span class="disclose-mark" aria-hidden="true"></span>
+                  <span class="sj-no num">{{ d.job ? jobNo({ id: d.job, serial: d.serial }) : '无任务编号' }}</span>
+                  <span class="sj-date num muted small">{{ d.as_of }}</span>
+                  <span class="sj-what">
+                    <span v-if="d.request" class="sj-req">“{{ d.request }}”</span>
+                    <span class="muted small sj-cond" :title="specBrief(d.spec)">{{ specBrief(d.spec) || d.label }}</span>
                   </span>
+                  <span class="sj-fig small"><span class="muted">{{ d.picks.length }} 只</span>
+                    <template v-if="d.checked_5"> · 5 日超额 <b class="num" :class="tone(d.excess_5)">{{ signed(d.excess_5) }}</b></template>
+                    <template v-else> · <span class="muted">约 {{ mmdd(d.check_from) }}后检验</span></template>
+                    <template v-if="d.checked_20"> · 20 日超额 <b class="num" :class="tone(d.excess_20)">{{ signed(d.excess_20) }}</b></template>
+                  </span>
+                </button>
+                <div v-if="opened[r.strategy + ':' + (d.job || d.as_of)]" class="screen-job-body">
+                  <p class="small sj-meta">
+                    <template v-if="d.checked_5">5 日：平均涨跌 <b class="num" :class="tone(d.ret_5)">{{ signed(d.ret_5) }}</b>，同期指数 {{ signed(d.bench_5) }}，跑赢 {{ pct(d.beat_5, 0) }}。</template>
+                    <template v-if="d.checked_20">20 日：平均涨跌 <b class="num" :class="tone(d.ret_20)">{{ signed(d.ret_20) }}</b>，同期指数 {{ signed(d.bench_20) }}，跑赢 {{ pct(d.beat_20, 0) }}。</template>
+                    <a v-if="d.mine" :href="'#/screen/' + d.job">打开这次选股</a>
+                    <span v-else-if="d.job" class="muted">其他账户的选股</span>
+                  </p>
+                  <table class="t sub">
+                    <thead><tr><th class="r">名次</th><th>股票</th><th class="r sm-hide">综合分</th><th class="r sm-hide">5 日涨跌</th><th class="r">5 日超额</th><th class="r sm-hide">20 日涨跌</th><th class="r">20 日超额</th></tr></thead>
+                    <tbody><tr v-for="p in d.picks" :key="p.ticker">
+                      <td class="r num">{{ p.rank }}</td><td><Tk :t="p.ticker"/></td>
+                      <td class="r num sm-hide">{{ p.score == null ? '—' : Math.round(p.score) }}</td>
+                      <td class="r num sm-hide" :class="tone(p.ret_5)">{{ p.ret_5 == null ? '' : signed(p.ret_5) }}</td>
+                      <td class="r num" :class="tone(p.excess_5)" :title="p.ret_5 == null ? '' : '涨跌 ' + signed(p.ret_5) + '，指数 ' + signed(p.bench_5)">{{ p.excess_5 == null ? '' : signed(p.excess_5) }}<span v-if="p.excess_5 == null" class="muted small">待检验</span></td>
+                      <td class="r num sm-hide" :class="tone(p.ret_20)">{{ p.ret_20 == null ? '' : signed(p.ret_20) }}</td>
+                      <td class="r num" :class="tone(p.excess_20)" :title="p.ret_20 == null ? '' : '涨跌 ' + signed(p.ret_20) + '，指数 ' + signed(p.bench_20)">{{ p.excess_20 == null ? '' : signed(p.excess_20) }}<span v-if="p.excess_20 == null" class="muted small">待检验</span></td>
+                    </tr></tbody></table>
                 </div>
-                <table class="t sub">
-                  <thead><tr><th class="r">名次</th><th>股票</th><th class="sm-hide">选股任务</th><th class="r sm-hide">综合分</th><th class="r sm-hide">5 日涨跌</th><th class="r">5 日超额</th><th class="r sm-hide">20 日涨跌</th><th class="r">20 日超额</th></tr></thead>
-                  <tbody><tr v-for="p in d.picks" :key="p.ticker">
-                    <td class="r num">{{ p.rank }}</td><td><Tk :t="p.ticker"/><span v-if="p.job && d.jobs && d.jobs.length > 1" class="sm-only muted small num"> {{ jobNo({ id: p.job, serial: p.serial }) }}</span></td>
-                    <td class="num sm-hide"><a v-if="p.job && p.mine" :href="'#/screen/' + p.job" @click.stop>{{ jobNo({ id: p.job, serial: p.serial }) }}</a><span v-else-if="p.job" class="muted">{{ jobNo({ id: p.job, serial: p.serial }) }}</span><span v-else class="muted">—</span></td>
-                    <td class="r num sm-hide">{{ p.score == null ? '—' : Math.round(p.score) }}</td>
-                    <td class="r num sm-hide" :class="tone(p.ret_5)">{{ p.ret_5 == null ? '' : signed(p.ret_5) }}</td>
-                    <td class="r num" :class="tone(p.excess_5)" :title="p.ret_5 == null ? '' : '涨跌 ' + signed(p.ret_5) + '，指数 ' + signed(p.bench_5)">{{ p.excess_5 == null ? '' : signed(p.excess_5) }}<span v-if="p.excess_5 == null" class="muted small">待检验</span></td>
-                    <td class="r num sm-hide" :class="tone(p.ret_20)">{{ p.ret_20 == null ? '' : signed(p.ret_20) }}</td>
-                    <td class="r num" :class="tone(p.excess_20)" :title="p.ret_20 == null ? '' : '涨跌 ' + signed(p.ret_20) + '，指数 ' + signed(p.bench_20)">{{ p.excess_20 == null ? '' : signed(p.excess_20) }}<span v-if="p.excess_20 == null" class="muted small">待检验</span></td>
-                  </tr></tbody></table>
               </div>
-              <p v-if="r.older_days" class="muted small">更早的 {{ r.older_days }} 个选股日没有列出。</p>
+              <p v-if="r.older_jobs" class="muted small" style="margin-top:8px">更早的 {{ r.older_jobs }} 次选股没有列出。</p>
             </td></tr>
           </template></tbody></table></div>
-        <p class="muted small" style="margin-top:8px">点策略名展开，看每次选股入选的股票、来自哪个选股任务（编号可点开当次选股），以及各自的涨跌。超额＝该股涨跌减同期沪深300涨跌。同一天同一策略重复选到的股票只记一次，算在最早选到它的任务上。</p>
+        <p class="muted small" style="margin-top:8px">点策略名展开，按选股任务列出（同一策略下加了不同条件的选股分开显示）；再点某次选股，看它入选的股票和各自的涨跌。超额＝该股涨跌减同期沪深300涨跌。策略的汇总数字里，同一天被几次选股选中的同一只股票只算一次。哪些选股计入，在“选股”页的“最近的选股”里用开关设置。</p>
         <p v-if="data.screens.pending" class="muted small" style="margin-top:4px">还有 <b class="num">{{ data.screens.pending }}</b> 个入选股票没满 5 个交易日。样本少的时候数字波动很大，至少攒几十个再下结论。</p>
       </section>
 
