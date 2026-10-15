@@ -37,7 +37,7 @@ def queue_daily(user_id: int, on_queued=None) -> int | None:
             logger.info("scheduled run for %s skipped: the previous one is still queued or running",
                         user.username)
             return None
-        job = jobs.create(s, user_id, "analysis", {"tickers": tickers, "runs": sched.runs if sched else None,
+        job = jobs.create(s, user_id, "analysis", {"tickers": tickers, "runs": (sched.runs or None) if sched else None,
                                                     "scheduled": True})
         job_id = job.id
     if on_queued:

@@ -575,7 +575,7 @@ const JobsView = {
   components: { StatusTag },
   setup() {
     const watch_ = ref([]), chosen = ref(new Set()), extra = ref(""), runs = ref(null), date = ref("");
-    const estimate = ref(null), jobs = ref([]), busy = ref(false);
+    const estimate = ref(null), jobs = ref([]), busy = ref(false), defaultRuns = ref(null);
     let timer;
     async function load() {
       try {
@@ -584,6 +584,7 @@ const JobsView = {
     }
     onMounted(async () => {
       try { watch_.value = await api("/watchlist"); chosen.value = new Set(watch_.value.map(w => w.ticker)); } catch (e) { fail(e); }
+      try { defaultRuns.value = (await api("/analyses/defaults")).runs; } catch (e) { /* the placeholder says 默认 */ }
       load(); timer = setInterval(load, 5000);
     });
     onUnmounted(() => clearInterval(timer));
@@ -602,7 +603,7 @@ const JobsView = {
       try { const j = await api("/analyses", { method: "POST", body: body() }); toast("已排队：" + jobTitle(j)); go("jobs/" + j.id); }
       catch (e) { fail(e); } finally { busy.value = false; }
     }
-    return { watch_, chosen, extra, runs, date, estimate, jobs, busy, tickers, toggle, start, when, money, duration, jobTitle };
+    return { watch_, chosen, extra, runs, date, estimate, jobs, busy, defaultRuns, tickers, toggle, start, when, money, duration, jobTitle };
   },
   template: `<div class="page">
     <div class="page-head"><div><h1>分析</h1><p>多位分析师、多空辩论、风控和组合经理依次给出结论。每只股票每次运行通常需要 5–15 分钟。</p></div></div>
@@ -612,7 +613,7 @@ const JobsView = {
         <span v-else class="muted small">自选股是空的，可以在下面直接输入代码。</span></div>
       <div class="form-grid" style="margin-top:14px">
         <label class="field"><span>其他代码（逗号分隔）</span><input class="input num" v-model="extra" placeholder="例如 600519.SS, 0700.HK, NVDA"></label>
-        <label class="field"><span>每只运行几次（投票）</span><input class="input num" type="number" min="1" max="5" v-model.number="runs" placeholder="默认"></label>
+        <label class="field"><span>每只运行几次（投票）</span><input class="input num" type="number" min="1" max="5" v-model.number="runs" :placeholder="defaultRuns ? '默认 ' + defaultRuns + ' 次' : '默认'"></label>
         <label class="field"><span>分析日期</span><input class="input num" type="date" v-model="date"></label>
       </div>
       <div class="row" style="margin-top:16px;justify-content:space-between">
@@ -943,7 +944,7 @@ const SettingsView = {
       if (isAdmin.value) try { users.value = await api("/admin/users"); } catch (e) { fail(e); }
     }
     async function saveSched() {
-      try { sched.value = await api("/schedule", { method: "PUT", body: { enabled: sched.value.enabled, time_of_day: sched.value.time_of_day, days: sched.value.days, runs: sched.value.runs } }); toast(sched.value.enabled ? "定时分析已开启" : "定时分析已关闭"); }
+      try { sched.value = await api("/schedule", { method: "PUT", body: { enabled: sched.value.enabled, time_of_day: sched.value.time_of_day, days: sched.value.days, runs: sched.value.runs || null } }); toast(sched.value.enabled ? "定时分析已开启" : "定时分析已关闭"); }
       catch (e) { fail(e); }
     }
     async function changePw() {
@@ -977,7 +978,7 @@ const SettingsView = {
         <div class="form-grid">
           <label class="field"><span>时间（北京时间）</span><input class="input num" type="time" v-model="sched.time_of_day" required></label>
           <label class="field"><span>哪几天</span><select class="input" v-model="sched.days"><option v-for="[k, v] in DAYS" :key="k" :value="k">{{ v }}</option></select></label>
-          <label class="field"><span>每只运行几次</span><input class="input num" type="number" min="1" max="5" v-model.number="sched.runs"></label>
+          <label class="field"><span>每只运行几次（投票）</span><input class="input num" type="number" min="1" max="5" v-model.number="sched.runs" :placeholder="'默认 ' + (sched.default_runs || 1) + ' 次'"></label>
         </div>
         <div class="row" style="margin-top:14px;justify-content:space-between">
           <span class="muted small">{{ sched.next_run ? '下次运行：' + when(sched.next_run) : '' }}</span><button class="btn primary">保存</button></div>

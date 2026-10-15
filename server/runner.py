@@ -23,7 +23,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from server import db
+from server import db, procs
 from server.models import Job, User
 from server.services import paper as paper_svc, portfolio as portfolio_svc
 
@@ -55,6 +55,40 @@ def job_log(job_id: int) -> Path:
 
 
 # --- cost ledger --------------------------------------------------------------------
+
+def _canonical(ticker) -> str:
+    from server.tickers import canonical
+
+    return canonical(ticker)
+
+
+def job_rows(rows: list[dict], job_id: int, started: datetime) -> list[dict]:
+    """The ledger rows this job wrote. A row names its job (``job_id``); a row from before
+    that column existed is the job's when its run began after the job started."""
+    out = []
+    for r in rows:
+        tag = str(r.get("job_id") or "").strip()
+        if tag:
+            if tag == str(job_id):
+                out.append(r)
+        elif _began_after(r, started):
+            out.append(r)
+    return out
+
+
+def _began_after(row: dict, started: datetime, slack: float = 5.0) -> bool:
+    """Whether the ledger row's run began after this job started. A row is written when its
+    run ends; one that ended during this job but began before it belongs to another process
+    (an analysis left running by an earlier service), not to this job."""
+    elapsed = _float(row.get("elapsed_seconds"))
+    try:
+        ended = datetime.strptime(str(row.get("run_time") or ""), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return True
+    if elapsed is None:
+        return True
+    return (ended - started).total_seconds() - elapsed >= -slack
+
 
 def _float(value):
     try:
@@ -177,19 +211,27 @@ def run_analysis(job: Job, user: User, config: dict, should_stop, poll: float = 
         out.write(f"$ tradingagents daily {','.join(job.params['tickers'])} "
                   f"(runs {job.params.get('runs') or 'default'})\n")
         out.flush()
+        env = analysis_env(config, user)
+        env["TRADINGAGENTS_JOB_ID"] = str(job.id)              # each ledger row it writes names this job
         proc = subprocess.Popen(analysis_command(job.params, portfolio_file), cwd=PROJECT_DIR,
-                                env=analysis_env(config, user), stdout=out, stderr=subprocess.STDOUT,
+                                env=env, stdout=out, stderr=subprocess.STDOUT,
                                 stdin=subprocess.DEVNULL)
-        while proc.poll() is None:
-            if should_stop():
-                proc.terminate()
-                try:
-                    proc.wait(timeout=20)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                raise Cancelled()
-            time.sleep(poll)
-    rows = ledger_rows(reports / "cost_ledger.csv", since=started)
+        handle = procs.contain(proc)                            # ends with the service, however it stops
+        procs.remember(work, proc.pid)
+        try:
+            while proc.poll() is None:
+                if should_stop():
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=20)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                    raise Cancelled()
+                time.sleep(poll)
+        finally:
+            procs.release(handle)
+            procs.forget(work)
+    rows = job_rows(ledger_rows(reports / "cost_ledger.csv", since=started), job.id, started)
     runs = [{"ticker": r.get("ticker"), "rating": r.get("rating"), "action": r.get("action"),
              "target_weight": _float(r.get("target_weight")), "stop": _float(r.get("stop")),
              "cost": _float(r.get("cost")), "currency": r.get("currency"),
@@ -200,8 +242,9 @@ def run_analysis(job: Job, user: User, config: dict, should_stop, poll: float = 
              "run_time": r.get("run_time")} for r in rows]
     if proc.returncode != 0 and not runs:
         raise RuntimeError(f"the batch exited with code {proc.returncode}; see the log")
-    done = {r["ticker"] for r in runs}
-    missing = [t for t in job.params["tickers"] if t not in done]
+    # The run writes the canonical symbol (603980.SH is recorded as 603980.SS): compare those.
+    done = {_canonical(r["ticker"]) for r in runs}
+    missing = [t for t in job.params["tickers"] if _canonical(t) not in done]
     return {"runs": runs, "missing": missing, "exit_code": proc.returncode}
 
 

@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from server.models import Holding, PortfolioCash
 from tradingagents.portfolio import PortfolioContext
+from server.tickers import canonical
 
 
 def holdings(s: Session, user_id: int) -> list[Holding]:
@@ -14,8 +15,9 @@ def holdings(s: Session, user_id: int) -> list[Holding]:
 
 
 def set_holding(s: Session, user_id: int, ticker: str, quantity: float, average_price: float | None = None) -> None:
-    ticker = ticker.strip().upper()
-    row = s.scalar(select(Holding).where(Holding.user_id == user_id, Holding.ticker == ticker))
+    ticker = canonical(ticker)
+    row = next((h for h in s.scalars(select(Holding).where(Holding.user_id == user_id))
+                if canonical(h.ticker) == ticker), None)
     if quantity == 0:
         if row:
             s.delete(row)

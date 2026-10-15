@@ -413,3 +413,61 @@ def test_a_streamed_run_prints_plain_progress_for_every_main_step(tmp_path, monk
         assert f"{step} 完成" in text, step
     assert "[进度 12/12]" in text.strip().splitlines()[-1]
     assert "[工具]" in text
+
+
+@pytest.mark.unit
+def test_a_second_run_of_the_same_day_reuses_the_analysts_reports(tmp_path, monkeypatch, offline, capsys):
+    """The analysts gather the same data for the same ticker and day: a second run (another
+    vote, or the evening batch after a manual run) takes their kept reports instead of
+    asking the model again; with reuse off it asks again."""
+    model = ScriptedModel()
+    graph = _graph(tmp_path, monkeypatch, model, research_styles="off")
+    first, _ = graph.propagate("NVDA", TRADE_DATE)
+    calls_first = len(model.calls)
+    monkeypatch.setenv("TRADINGAGENTS_PLAIN_PROGRESS", "1")
+    second, signal = graph.propagate("NVDA", TRADE_DATE)
+    calls_second = len(model.calls) - calls_first
+
+    assert signal == "Overweight"
+    for key in ("market_report", "sentiment_report", "news_report", "fundamentals_report"):
+        assert second[key] == first[key] and second[key].strip()
+    assert calls_second < calls_first                               # the analysts were not asked
+    assert "[复用] 市场分析师" in capsys.readouterr().out
+    assert len(list((tmp_path / "cache" / "analyst_reports" / "NVDA").rglob("*.json"))) == 4
+
+    off = ScriptedModel()
+    graph = _graph(tmp_path / "off", monkeypatch, off, research_styles="off", analyst_report_reuse_hours=0)
+    graph.propagate("NVDA", TRADE_DATE)
+    calls_off = len(off.calls)
+    graph.propagate("NVDA", TRADE_DATE)
+    assert len(off.calls) - calls_off == calls_off
+    assert not (tmp_path / "off" / "cache" / "analyst_reports").exists()
+
+
+@pytest.mark.unit
+def test_a_kept_report_expires_for_a_day_still_trading(tmp_path, monkeypatch):
+    import time
+    from datetime import date, timedelta
+
+    from tradingagents.graph.report_cache import ReportCache
+
+    cache = ReportCache(tmp_path, hours=4, model="m", provider="p", language="Chinese")
+    today = {"company_of_interest": "NVDA", "trade_date": date.today().isoformat(), "asset_type": "stock"}
+    past = {**today, "trade_date": (date.today() - timedelta(days=3)).isoformat()}
+    cache.put("market", today, "report today")
+    cache.put("market", past, "report past")
+    assert cache.get("market", today)[0] == "report today"
+    assert cache.get("news", today) is None                          # another analyst
+    other = ReportCache(tmp_path, hours=4, model="other-model", provider="p", language="Chinese")
+    assert other.get("market", today) is None                        # another model
+    import json
+
+    for state in (today, past):                                      # written 5 hours ago
+        path = cache._path("market", state)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        path.write_text(json.dumps({**data, "written": time.time() - 5 * 3600}), encoding="utf-8")
+    assert cache.get("market", today) is None                        # older than 4 hours
+    assert cache.get("market", past)[0] == "report past"             # a past day's data is final
+    cache.put("market", today, "   ")                                # an empty report is not kept
+    assert cache.get("market", today) is None
+    assert ReportCache.from_config({"analyst_report_reuse_hours": 0}) is None

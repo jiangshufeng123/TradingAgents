@@ -17,7 +17,7 @@ def create_user(s: Session, username: str, password: str, role: str = "user", di
                 display_name=display_name or username)
     s.add(user)
     s.flush()
-    s.add(Schedule(user_id=user.id))
+    s.add(Schedule(user_id=user.id, runs=0))                # runs: follow TRADINGAGENTS_VOTE_RUNS
     return user
 
 

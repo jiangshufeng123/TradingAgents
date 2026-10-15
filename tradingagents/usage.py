@@ -11,6 +11,7 @@ account; token counts are always recorded.
 from __future__ import annotations
 
 import csv
+import os
 import threading
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -35,6 +36,7 @@ LEDGER_FIELDS = (
     "cost", "currency", "elapsed_seconds", "report_dir",
     "vote_runs", "vote_ratings", "agreement",
     "action", "target_weight", "stop",
+    "job_id",
 )
 
 
@@ -293,4 +295,6 @@ def ledger_row(summary: dict, *, run_time: str, ticker: str, trade_date: str, ra
         "action": sizing.action if sizing else "",
         "target_weight": "" if sizing is None or sizing.target_weight is None else round(sizing.target_weight, 4),
         "stop": round(sizing.stop, 4) if sizing else "",
+        # The web service's job that ran this (set by the service; empty for a run you start).
+        "job_id": os.environ.get("TRADINGAGENTS_JOB_ID", ""),
     }

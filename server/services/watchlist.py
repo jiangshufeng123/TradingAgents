@@ -4,14 +4,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from server.models import WatchlistItem
-from tradingagents.dataflows.symbols import normalize_symbol
+from server.tickers import canonical
 
 
 def _key(ticker: str) -> str:
-    try:
-        return normalize_symbol(ticker.strip()).upper()
-    except Exception:
-        return ticker.strip().upper()
+    return canonical(ticker)
 
 
 def items(s: Session, user_id: int) -> list[WatchlistItem]:

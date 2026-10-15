@@ -238,12 +238,24 @@ def test_analysis_runner_end_to_end_with_a_stand_in_batch(env, monkeypatch, tmp_
         "with open(path, 'a', encoding='utf-8', newline='') as f:\n"
         "    w = csv.DictWriter(f, fieldnames=LEDGER_FIELDS, extrasaction='ignore'); w.writeheader()\n"
         "    w.writerow({'run_time': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 'ticker': 'NVDA',\n"
-        "                'rating': 'Hold', 'cost': '0.3', 'currency': 'CNY', 'llm_calls': '20'})\n"
+        "                'rating': 'Hold', 'cost': '0.3', 'currency': 'CNY', 'llm_calls': '20',\n"
+        "                'job_id': os.environ.get('TRADINGAGENTS_JOB_ID', '')})\n"
+        "    # Another job's analysis finishing meanwhile: not this job's result or cost.\n"
+        "    w.writerow({'run_time': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 'ticker': 'MSFT',\n"
+        "                'rating': 'Sell', 'cost': '2.9', 'job_id': '999'})\n"
         "sys.exit(1)\n", encoding="utf-8")
     monkeypatch.setattr(runner, "analysis_command", lambda params, pf: [sys.executable, str(script)])
     result = runner.run_analysis(job, user, env, lambda: False, poll=0.05)
     assert [r["ticker"] for r in result["runs"]] == ["NVDA"] and result["missing"] == ["AAPL"]
+
+    # Asked as 603980.SH, recorded by the run as 603980.SS: that is the same listing, not missing.
+    with db.session() as s:
+        sh_job = jobs.create(s, 1, "analysis", {"tickers": ["603980.SH"], "runs": 1})
+    script.write_text(script.read_text(encoding="utf-8").replace("'NVDA'", "'603980.SS'"), encoding="utf-8")
+    result = runner.run_analysis(sh_job, user, env, lambda: False, poll=0.05)
+    assert result["missing"] == [] and result["runs"][-1]["ticker"] == "603980.SS"
     assert result["exit_code"] == 1 and "1/2 NVDA" in runner.job_log(job.id).read_text(encoding="utf-8")
+    assert not runner.procs.pid_file(runner.job_log(job.id).with_suffix("")).exists()
 
     slow = tmp_path / "slow.py"
     slow.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
@@ -280,6 +292,14 @@ def test_schedule_and_daily_queue(app, env):
     from server import scheduler
 
     ian = _client(app)
+    from server.app import create_app
+
+    three = _client(create_app({**env, "vote_runs": 3}, start_worker=False, start_scheduler=False))
+    assert three.get("/api/analyses/defaults").json() == {"runs": 3}
+    assert three.post("/api/analyses/estimate", json={"tickers": ["NVDA"]}, headers=H).json()["runs"] == 3
+    first = three.get("/api/schedule").json()                 # a new account follows the configured default
+    assert first["runs"] is None and first["default_runs"] == 3 and not first["enabled"]
+    assert three.put("/api/schedule", json={"enabled": False, "runs": None}, headers=H).json()["runs"] is None
     assert ian.put("/api/schedule", json={"enabled": True, "time_of_day": "25:00"}, headers=H).status_code == 422
     out = ian.put("/api/schedule", json={"enabled": True, "time_of_day": "18:30", "days": "mon-fri", "runs": 2},
                   headers=H).json()
@@ -394,3 +414,43 @@ def test_paper_account_opened_and_switched_from_the_page(app, env):
     assert ian.post("/api/paper/open", json={"cash": -5}, headers=H).status_code == 422
     amy = _client(app, "amy", "user-pass-1")
     assert amy.get("/api/paper").json()["exists"] is False                                       # per user
+
+
+def test_ledger_rows_from_an_earlier_process_are_not_the_jobs():
+    """A row written during the job by an analysis that began before it (one left running
+    by a restarted service) is not counted as the job's result or cost."""
+    from datetime import datetime
+
+    from server import runner
+
+    started = datetime(2026, 10, 15, 20, 1, 44)
+    orphan = {"run_time": "2026-10-15 20:16:46", "elapsed_seconds": "1027.5"}   # began 19:59:39
+    own = {"run_time": "2026-10-15 20:19:44", "elapsed_seconds": "546.0"}       # began 20:10:38
+    assert not runner._began_after(orphan, started)
+    assert runner._began_after(own, started)
+    assert runner._began_after({"run_time": "2026-10-15 20:10:00"}, started)    # no elapsed: keep
+
+
+def test_ledger_rows_name_their_job():
+    from datetime import datetime
+
+    from server import runner
+
+    started = datetime(2026, 10, 15, 20, 1, 44)
+    rows = [{"ticker": "A", "job_id": "7", "run_time": "2026-10-15 20:10:00"},
+            {"ticker": "B", "job_id": "5", "run_time": "2026-10-15 20:16:46", "elapsed_seconds": "10"},
+            {"ticker": "C", "run_time": "2026-10-15 20:19:44", "elapsed_seconds": "60"}]
+    assert [r["ticker"] for r in runner.job_rows(rows, 7, started)] == ["A", "C"]
+
+
+def test_ledger_row_records_the_service_job(monkeypatch):
+    from tradingagents.usage import LEDGER_FIELDS, ledger_row
+
+    summary = {"total": {"calls": 1, "input_tokens": 1, "output_tokens": 1, "cached_input_tokens": 0},
+               "tiers": {}, "cost": 0.1, "currency": "¥"}
+    kw = dict(run_time="t", ticker="X", trade_date="d", rating="Hold", analysts=[], config={},
+              elapsed_seconds=1.0, report_dir="")
+    monkeypatch.setenv("TRADINGAGENTS_JOB_ID", "42")
+    assert "job_id" in LEDGER_FIELDS and ledger_row(summary, **kw)["job_id"] == "42"
+    monkeypatch.delenv("TRADINGAGENTS_JOB_ID")
+    assert ledger_row(summary, **kw)["job_id"] == ""

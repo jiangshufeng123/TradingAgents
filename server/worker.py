@@ -32,7 +32,15 @@ class Worker:
 
     # control
     def start(self) -> None:
+        from sqlalchemy import select
+
+        from server import procs, runner
+
         with db.session() as s:
+            # An analysis the last service left running is stopped before its job is marked failed,
+            # so it cannot write its results into a later job.
+            for job in s.scalars(select(Job).where(Job.status.in_(("running", "cancelling")))):
+                procs.stop_leftover(runner.job_log(job.id).with_suffix(""))
             n = job_svc.interrupted(s)
         if n:
             logger.warning("%d job(s) were left running by the last server and are marked failed", n)

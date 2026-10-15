@@ -706,8 +706,15 @@ def service_install(
     launcher.write_text(f'CreateObject("WScript.Shell").Run "{command}", 0, False\r\n', encoding="utf-16")
     console.print(f"[green]Installed:[/green] {launcher}")
     if start:
-        _stop_service_processes()          # a previous copy would hold the port
-        subprocess.Popen(["wscript.exe", str(launcher)])
+        left = _stop_service_processes()   # a previous copy would hold the port
+        if left:
+            console.print("[red]The running service could not be stopped[/red] (" + "; ".join(left) + "), so "
+                          "it keeps running the old code and settings. It was most likely started from an "
+                          "administrator window. Open PowerShell as administrator and run:\n"
+                          "  " + STOP_SERVICE_PS + "\n"
+                          "then run this command again from this (ordinary) window.", soft_wrap=True)
+            raise typer.Exit(code=1)
+        subprocess.Popen(["wscript.exe", str(launcher)], env=_env_without_dotenv())
         console.print("Started in the background; it answers in about 10 seconds "
                       "(check with: tradingagents server service status).")
     console.print(f"The service starts each time you sign in to Windows and restarts itself if it stops. "
@@ -759,20 +766,58 @@ def service_remove(yes: bool = typer.Option(False, "--yes", "-y", help="Stop eve
     code, _ = _schtasks("/Query", "/TN", SERVER_TASK)       # an older install used a scheduled task
     if code == 0:
         _schtasks("/Delete", "/F", "/TN", SERVER_TASK)
-    _stop_service_processes()
-    console.print("[green]The service is stopped and will not start at sign-in.[/green]")
+    left = _stop_service_processes()
+    if left:
+        console.print("[red]Still running[/red] (" + "; ".join(left) + "): started from an administrator window? "
+                      "Stop it from PowerShell run as administrator:\n  " + STOP_SERVICE_PS, soft_wrap=True)
+    else:
+        console.print("[green]The service is stopped and will not start at sign-in.[/green]")
 
 
-def _stop_service_processes() -> None:
-    """End the hidden PowerShell loop and the server it started."""
+def _env_without_dotenv() -> dict:
+    """This process's environment minus what it loaded from .env.
+
+    Importing tradingagents loads .env into os.environ, and a child inherits that; a value
+    already in the environment wins over .env, so a service started with it would keep
+    today's .env values through every later restart and edit. Without them, the service
+    reads .env itself each time it starts (it runs in the project folder)."""
+    import os
+
+    from dotenv import dotenv_values, find_dotenv
+
+    env = dict(os.environ)
+    path = find_dotenv(usecwd=True)
+    for key, value in (dotenv_values(path) if path else {}).items():
+        if env.get(key) == value:
+            env.pop(key, None)
+    return env
+
+
+# For an administrator window, which may not have the conda environment.
+STOP_SERVICE_PS = ("Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'run_server.ps1' -or "
+                   "$_.CommandLine -match 'tradingagents.*server run' -or $_.CommandLine -match '-m cli.main daily' } "
+                   "| ForEach-Object { Stop-Process -Id $_.ProcessId -Force }")
+
+
+def _stop_service_processes() -> list[str]:
+    """End the hidden PowerShell loop and the server it started.
+
+    Returns what is still running afterwards (process id and name). Something is left when
+    Windows refuses to stop it, which is what happens to a service started from an
+    administrator window when this runs from an ordinary one."""
     import subprocess
 
     # The loop, the server, and any analysis the server started (`python -m cli.main daily`;
     # a `tradingagents daily` you run yourself is left alone).
-    script = ("Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'run_server.ps1' -or "
-              "$_.CommandLine -match 'tradingagents.*server run' -or $_.CommandLine -match '-m cli.main daily' } | "
-              "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }")
-    subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True, text=True)
+    # Skip this PowerShell itself: its own command line contains these patterns, and stopping
+    # it first would leave the rest running.
+    find = ("Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID } | "
+            "Where-Object { $_.CommandLine -match 'run_server.ps1' -or "
+            "$_.CommandLine -match 'tradingagents.*server run' -or $_.CommandLine -match '-m cli.main daily' }")
+    script = (f"{find} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}; "
+              f"Start-Sleep -Seconds 2; {find} | ForEach-Object {{ '' + $_.ProcessId + ' ' + $_.Name }}")
+    out = subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True, text=True)
+    return [line.strip() for line in (getattr(out, "stdout", "") or "").splitlines() if line.strip()]
 
 
 @service_app.command("status")

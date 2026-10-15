@@ -131,3 +131,40 @@ def test_restarting_asks_first_when_an_analysis_is_running(monkeypatch, tmp_path
     assert r.exit_code == 1 and "Job 7" in r.output and started == []
     r = CliRunner().invoke(cli_main.app, ["server", "service", "install", "--yes"])
     assert r.exit_code == 0 and len(started) == 1
+
+
+def test_service_is_started_without_the_dotenv_values(tmp_path, monkeypatch):
+    """The service reads .env itself when it starts, so editing .env and restarting takes
+    effect: it must not inherit the values the install command loaded."""
+    from cli.main import _env_without_dotenv
+
+    (tmp_path / ".env").write_text("TRADINGAGENTS_VOTE_RUNS=2\nOTHER_SETTING=x\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TRADINGAGENTS_VOTE_RUNS", "2")        # as load_dotenv left it
+    monkeypatch.setenv("OTHER_SETTING", "set-by-the-user")    # differs from .env: the user's own
+    env = _env_without_dotenv()
+    assert "TRADINGAGENTS_VOTE_RUNS" not in env
+    assert env["OTHER_SETTING"] == "set-by-the-user"
+    assert "PATH" in env
+
+
+@pytest.mark.unit
+def test_install_stops_when_the_old_service_cannot_be_stopped(monkeypatch, tmp_path):
+    """A service started from an administrator window cannot be stopped from an ordinary
+    one: say so and how to stop it, rather than start a second copy that cannot get the port."""
+    import subprocess
+    from types import SimpleNamespace
+
+    from typer.testing import CliRunner
+
+    from cli import main as cli_main
+
+    started = []
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    monkeypatch.setattr(cli_main, "_on_windows", lambda: True)
+    monkeypatch.setattr(cli_main, "_running_jobs", lambda: [])
+    monkeypatch.setattr(subprocess, "Popen", lambda args, **k: started.append(args))
+    monkeypatch.setattr(subprocess, "run", lambda args, **k: SimpleNamespace(stdout="16948 python.exe\n", returncode=0))
+    r = CliRunner().invoke(cli_main.app, ["server", "service", "install"])
+    assert r.exit_code == 1 and started == []
+    assert "16948 python.exe" in r.output and "administrator" in r.output and "Stop-Process" in r.output

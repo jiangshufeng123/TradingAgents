@@ -51,7 +51,7 @@ def _tools_or_done(state) -> str:
     return "tools" if state["messages"][-1].tool_calls else END
 
 
-def _analyst_graph(spec, agent, max_tool_rounds: int):
+def _analyst_graph(spec, agent, max_tool_rounds: int, cache=None):
     """One analyst as a graph of its own: the model and its tools, on a private message history.
 
     It returns only its report, so analysts running side by side never write the
@@ -63,9 +63,34 @@ def _analyst_graph(spec, agent, max_tool_rounds: int):
     output = TypedDict(f"{spec.key.capitalize()}Report", {spec.report_key: str})
     graph = StateGraph(AgentState, output_schema=output)
     graph.add_node("agent", agent)
-    graph.add_edge(START, "agent")
+    # With a report cache (tradingagents/graph/report_cache.py), a report kept for this ticker
+    # and day is used instead of asking the model again, and a new one is kept when done.
+    done = END
+    if cache is not None:
+        from .report_cache import announce
+
+        def reuse(state):
+            hit = cache.get(spec.key, state)
+            if hit is None:
+                return {}
+            announce(spec.key, hit[1])
+            return {spec.report_key: hit[0]}
+
+        def keep(state):
+            cache.put(spec.key, state, state.get(spec.report_key) or "")
+            return {}
+
+        graph.add_node("reuse", reuse)
+        graph.add_node("keep", keep)
+        graph.add_edge(START, "reuse")
+        graph.add_conditional_edges("reuse", lambda s: END if (s.get(spec.report_key) or "").strip() else "agent",
+                                    ["agent", END])
+        graph.add_edge("keep", END)
+        done = "keep"
+    else:
+        graph.add_edge(START, "agent")
     if not spec.tools:
-        graph.add_edge("agent", END)
+        graph.add_edge("agent", done)
         return graph.compile()
 
     def calls(messages):
@@ -77,6 +102,9 @@ def _analyst_graph(spec, agent, max_tool_rounds: int):
     def more_or_wrap_up(state) -> str:
         return "wrap_up" if rounds(state["messages"]) >= max_tool_rounds else "agent"
 
+    def agent_or_done(state) -> str:
+        return "tools" if _tools_or_done(state) == "tools" else done
+
     def wrap_up(state):
         repeated = ", ".join(f"{name} x{n}" for name, n in Counter(calls(state["messages"])).most_common())
         logger.warning("%s used its %d tool rounds (%s); asking for its report",
@@ -85,9 +113,9 @@ def _analyst_graph(spec, agent, max_tool_rounds: int):
 
     graph.add_node("tools", ToolNode(list(spec.tools)))
     graph.add_node("wrap_up", wrap_up)
-    graph.add_conditional_edges("agent", _tools_or_done, ["tools", END])
+    graph.add_conditional_edges("agent", agent_or_done, ["tools", done])
     graph.add_conditional_edges("tools", more_or_wrap_up, ["agent", "wrap_up"])
-    graph.add_edge("wrap_up", END)
+    graph.add_edge("wrap_up", done)
     return graph.compile()
 
 
@@ -100,8 +128,10 @@ class GraphSetup:
         deep_thinking_llm: Any,
         conditional_logic: ConditionalLogic,
         max_tool_rounds: int,
+        report_cache=None,
     ):
         """Initialize with required components."""
+        self.report_cache = report_cache
         self.quick_thinking_llm = quick_thinking_llm
         self.deep_thinking_llm = deep_thinking_llm
         self.conditional_logic = conditional_logic
@@ -145,7 +175,8 @@ class GraphSetup:
 
         for spec in plan.specs:
             workflow.add_node(spec.agent_node,
-                              _analyst_graph(spec, analyst_factories[spec.key](), self.max_tool_rounds))
+                              _analyst_graph(spec, analyst_factories[spec.key](), self.max_tool_rounds,
+                                             self.report_cache))
 
         workflow.add_node("Bull Researcher", bull_researcher_node)
         workflow.add_node("Bear Researcher", bear_researcher_node)

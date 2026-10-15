@@ -22,6 +22,7 @@ from tradingagents.reporting import write_report_tree
 from .checkpointer import checkpoint_step, clear_checkpoint, get_checkpointer, thread_id
 from .conditional_logic import ConditionalLogic
 from .propagation import Propagator
+from .report_cache import ReportCache
 from .setup import GraphSetup
 
 logger = logging.getLogger(__name__)
@@ -109,6 +110,7 @@ class TradingAgentsGraph:
             self.deep_thinking_llm,
             self.conditional_logic,
             max_tool_rounds,
+            report_cache=ReportCache.from_config(self.config),
         )
 
         self.propagator = Propagator(

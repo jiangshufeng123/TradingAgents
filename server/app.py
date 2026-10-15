@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 from server import db
 from server.models import Job, Schedule, User
 from server.services import auth, costs, jobs, portfolio as portfolio_svc, users, watchlist
+from server.tickers import canonical as canonical_ticker, canonicalize_stored
 
 COOKIE = "ta_session"
 CLIENT_HEADER = "x-ta-client"
@@ -77,7 +78,7 @@ class ScheduleIn(BaseModel):
     enabled: bool
     time_of_day: str = "18:30"
     days: str = "mon-fri"
-    runs: int = Field(2, ge=1, le=5)
+    runs: int | None = Field(None, ge=1, le=5)        # None: follow TRADINGAGENTS_VOTE_RUNS
 
 
 class PaperOpenIn(BaseModel):
@@ -113,6 +114,7 @@ class UserPatch(BaseModel):
 # --- helpers ----------------------------------------------------------------------
 
 def _clean_tickers(raw: list[str]) -> list[str]:
+    """Split, check and spell each ticker the way the analysis records it (603980.SH -> 603980.SS)."""
     out = []
     for t in raw:
         for part in str(t).replace(";", ",").split(","):
@@ -121,7 +123,7 @@ def _clean_tickers(raw: list[str]) -> list[str]:
                 continue
             if not TICKER.match(part):
                 raise HTTPException(422, f"not a ticker: {part!r}")
-            out.append(part)
+            out.append(canonical_ticker(part))
     return list(dict.fromkeys(out))
 
 
@@ -175,6 +177,7 @@ def create_app(config: dict | None = None, *, start_worker: bool = True, start_s
         db.init_db()
         with db.session() as s:
             auth.purge_expired(s)
+            canonicalize_stored(s)
         if start_worker:
             from server.worker import Worker
 
@@ -576,6 +579,11 @@ def create_app(config: dict | None = None, *, start_worker: bool = True, start_s
         runs = body.runs or int(config.get("vote_runs") or 1)
         return {"tickers": tickers, "runs": runs, "date": body.date}
 
+    @app.get("/api/analyses/defaults")
+    def analysis_defaults(user: User = Depends(current_user)):
+        """What an analysis uses when the form leaves a field empty (from .env at service start)."""
+        return {"runs": int(config.get("vote_runs") or 1)}
+
     @app.post("/api/analyses/estimate")
     def analysis_estimate(body: AnalysisIn, user: User = Depends(current_user)):
         from server.runner import estimate
@@ -645,9 +653,14 @@ def create_app(config: dict | None = None, *, start_worker: bool = True, start_s
     @app.get("/api/schedule")
     def schedule_get(user: User = Depends(current_user)):
         with db.session() as s:
-            sched = s.get(Schedule, user.id) or Schedule(user_id=user.id)
-            out = {"enabled": bool(sched.enabled), "time_of_day": sched.time_of_day or "18:30",
-                   "days": sched.days or "mon-fri", "runs": sched.runs or 2}
+            sched = s.get(Schedule, user.id)
+            # runs None: the account follows TRADINGAGENTS_VOTE_RUNS (default_runs), as the
+            # analysis page does; a number is one the user chose for the schedule.
+            out = {"enabled": bool(sched and sched.enabled),
+                   "time_of_day": (sched and sched.time_of_day) or "18:30",
+                   "days": (sched and sched.days) or "mon-fri",
+                   "runs": (sched.runs or None) if sched else None,
+                   "default_runs": int(config.get("vote_runs") or 1)}
         nxt = state["scheduler"].next_run(user.id) if state["scheduler"] else None
         out["next_run"] = _iso(nxt.replace(tzinfo=None)) if nxt else None
         return out
@@ -668,7 +681,7 @@ def create_app(config: dict | None = None, *, start_worker: bool = True, start_s
                 sched = Schedule(user_id=user.id)
                 s.add(sched)
             sched.enabled, sched.time_of_day, sched.days, sched.runs = \
-                body.enabled, body.time_of_day, body.days, body.runs
+                body.enabled, body.time_of_day, body.days, body.runs or 0
         if state["scheduler"]:
             state["scheduler"].reload()
         return schedule_get(user)

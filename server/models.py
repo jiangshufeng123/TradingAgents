@@ -111,7 +111,8 @@ class Schedule(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     time_of_day: Mapped[str] = mapped_column(String(5), default="18:30")
     days: Mapped[str] = mapped_column(String(32), default="mon-fri")
-    runs: Mapped[int] = mapped_column(Integer, default=2)
+    # Runs per ticker; 0 follows TRADINGAGENTS_VOTE_RUNS (the default for a new account).
+    runs: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class AuthSession(Base):

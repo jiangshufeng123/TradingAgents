@@ -29,6 +29,7 @@ _ENV_OVERRIDES = {
     # currency label shown with them.
     "TRADINGAGENTS_DROP_UNSETTLED_BAR":   "drop_unsettled_bar",
     "TRADINGAGENTS_VOTE_RUNS":            "vote_runs",
+    "TRADINGAGENTS_REPORT_REUSE_HOURS":   "analyst_report_reuse_hours",
     # Answers to the CLI's questions, so a run asks fewer of them (true/false).
     "TRADINGAGENTS_SAVE_REPORT":          "save_report",
     "TRADINGAGENTS_SHOW_REPORT":          "show_report",
@@ -190,6 +191,9 @@ def build_default_config() -> dict:
         # the majority rating is the decision (see tradingagents/vote.py); the
         # cost grows with it.
         "vote_runs": 1,
+        # Reuse an analyst's report for the same ticker and trading day within this many
+        # hours (a past trading day: 30 days); 0 = always ask the model. graph/report_cache.py
+        "analyst_report_reuse_hours": 4,
         # Answers to the CLI's questions (None: ask). save/show/html/open take
         # true/false; default_analysts is a comma list such as
         # "market,sentiment,news,fundamentals". Command-line flags still win.
