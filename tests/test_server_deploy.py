@@ -168,3 +168,71 @@ def test_install_stops_when_the_old_service_cannot_be_stopped(monkeypatch, tmp_p
     r = CliRunner().invoke(cli_main.app, ["server", "service", "install"])
     assert r.exit_code == 1 and started == []
     assert "16948 python.exe" in r.output and "administrator" in r.output and "Stop-Process" in r.output
+
+
+@pytest.mark.unit
+def test_selfcheck_reports_a_service_on_old_code_and_a_failed_analysis(monkeypatch, tmp_path):
+    import io
+    import json
+    import subprocess
+    import urllib.request
+    from types import SimpleNamespace
+
+    from typer.testing import CliRunner
+
+    from cli import main as cli_main
+    from server import version
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "set")
+    monkeypatch.setitem(cli_main.DEFAULT_CONFIG, "llm_provider", "deepseek")
+    monkeypatch.setitem(cli_main.DEFAULT_CONFIG, "vote_runs", 1)
+    seen = {}
+
+    def good_run(cmd, **kw):
+        seen["env"] = kw["env"]
+        reports = __import__("pathlib").Path(kw["env"]["TRADINGAGENTS_REPORTS_DIR"])
+        (reports / "X" / "d").mkdir(parents=True)
+        (reports / "X" / "d" / "complete_report.html").write_text("<h1>x</h1>")
+        (reports / "cost_ledger.csv").write_text("run_time\n")
+        return SimpleNamespace(returncode=0, stdout="[进度 12/12] 组合经理 完成\nAnalyzed 1/1: X\n", stderr="")
+
+    health = {"ok": True, "started": "2026-10-15T21:11:13", "code": "old",
+              "settings": {**version.settings(cli_main.DEFAULT_CONFIG), "vote_runs": 2}}
+    monkeypatch.setattr(subprocess, "run", good_run)
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: io.BytesIO(json.dumps(health).encode()))
+    r = CliRunner().invoke(cli_main.app, ["server", "selfcheck"], env={"COLUMNS": "200"})
+    assert r.exit_code == 0, r.output
+    assert "不是磁盘上的最新代码" in r.output and "vote_runs 2→1" in r.output and "需要重启" in r.output
+    env = seen["env"]                                   # nothing of the user's is touched
+    assert env["TRADINGAGENTS_SELFCHECK"] == "1" and env["TRADINGAGENTS_REPORT_REUSE_HOURS"] == "0"
+    assert env["TRADINGAGENTS_PAPER_TRADING"] == "false" and "ta-selfcheck-" in env["TRADINGAGENTS_REPORTS_DIR"]
+
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: SimpleNamespace(
+        returncode=0, stdout="600519.SS failed: 'NoneType' object has no attribute 'write'\nAnalyzed 0/1: -\n", stderr=""))
+    r = CliRunner().invoke(cli_main.app, ["server", "selfcheck"], env={"COLUMNS": "200"})
+    assert r.exit_code == 1 and "没有得出结论" in r.output and "先别重启" in r.output and "NoneType" in r.output
+
+
+@pytest.mark.unit
+def test_the_log_keeps_requests_that_matter_and_two_weeks_of_files(tmp_path):
+    import logging
+    import os
+    import time
+
+    from server.logs import QuietAccess, prune
+
+    def line(method, status):
+        return logging.LogRecord("uvicorn.access", logging.INFO, "", 0, '%s - "%s %s HTTP/%s" %d',
+                                 ("127.0.0.1:1", method, "/api/jobs", "1.1", status), None)
+
+    quiet = QuietAccess()
+    assert not quiet.filter(line("GET", 200)) and not quiet.filter(line("GET", 304))
+    assert quiet.filter(line("GET", 404)) and quiet.filter(line("POST", 200)) and quiet.filter(line("GET", 500))
+
+    now = time.time()
+    for name, age_days in (("server_2026-09-01.log", 30), ("server_2026-10-10.log", 5), ("other.log", 30)):
+        path = tmp_path / name
+        path.write_text("x")
+        os.utime(path, (now - age_days * 86400, now - age_days * 86400))
+    assert [p.name for p in prune(tmp_path, now=now)] == ["server_2026-09-01.log"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["other.log", "server_2026-10-10.log"]

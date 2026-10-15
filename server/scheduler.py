@@ -20,9 +20,16 @@ logger = logging.getLogger(__name__)
 TIMEZONE = os.environ.get("TRADINGAGENTS_TIMEZONE", "Asia/Shanghai")
 
 
-def queue_daily(user_id: int, on_queued=None) -> int | None:
-    """Queue the user's watchlist for analysis now; the job id, or None when nothing to do."""
-    from server.services import jobs, watchlist
+def queue_daily(user_id: int, on_queued=None, config: dict | None = None) -> int | None:
+    """Queue the user's watchlist for analysis now; the job id, or None when nothing to do.
+
+    It is held to the spending caps like a run started from the web page: over a cap, the job
+    is recorded as failed with the reason, so the analysis page shows why nothing ran."""
+    from server import runner
+    from server.services import costs, jobs, watchlist
+    from tradingagents.default_config import DEFAULT_CONFIG
+
+    config = config or DEFAULT_CONFIG
 
     with db.session() as s:
         user = s.get(User, user_id)
@@ -37,9 +44,16 @@ def queue_daily(user_id: int, on_queued=None) -> int | None:
             logger.info("scheduled run for %s skipped: the previous one is still queued or running",
                         user.username)
             return None
-        job = jobs.create(s, user_id, "analysis", {"tickers": tickers, "runs": (sched.runs or None) if sched else None,
-                                                    "scheduled": True})
+        runs = (sched.runs or None) if sched else None
+        est = runner.estimate(config, user, tickers, runs or int(config.get("vote_runs") or 1))
+        ok, _, why = costs.check_budget(s, user, est or 0.0, config)
+        job = jobs.create(s, user_id, "analysis", {"tickers": tickers, "runs": runs, "scheduled": True,
+                                                    "estimate": est})
         job_id = job.id
+        if not ok:
+            jobs.fail(s, job, "定时分析没有运行：" + why)
+            logger.warning("scheduled run for %s skipped: %s", user.username, why)
+            return None
     if on_queued:
         on_queued()
     return job_id
@@ -73,6 +87,14 @@ class DailyScheduler:
             logger.info("database backup: %s", backup())
         except Exception as exc:          # a PostgreSQL database, or a full disk: say so, keep running
             logger.warning("database backup skipped: %s", exc)
+        try:
+            from server.logs import prune
+
+            gone = prune()
+            if gone:
+                logger.info("deleted %d service log(s) older than 14 days", len(gone))
+        except Exception as exc:
+            logger.warning("old service logs not cleaned: %s", exc)
 
     def stop(self) -> None:
         if self.scheduler.running:

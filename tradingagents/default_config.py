@@ -30,6 +30,8 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_DROP_UNSETTLED_BAR":   "drop_unsettled_bar",
     "TRADINGAGENTS_VOTE_RUNS":            "vote_runs",
     "TRADINGAGENTS_REPORT_REUSE_HOURS":   "analyst_report_reuse_hours",
+    "TRADINGAGENTS_DAILY_BUDGET":         "daily_budget",
+    "TRADINGAGENTS_BALANCE_ALERT":        "balance_alert",
     # Answers to the CLI's questions, so a run asks fewer of them (true/false).
     "TRADINGAGENTS_SAVE_REPORT":          "save_report",
     "TRADINGAGENTS_SHOW_REPORT":          "show_report",
@@ -194,6 +196,11 @@ def build_default_config() -> dict:
         # Reuse an analyst's report for the same ticker and trading day within this many
         # hours (a past trading day: 30 days); 0 = always ask the model. graph/report_cache.py
         "analyst_report_reuse_hours": 4,
+        # The web service: model spending cap per account per day (0 = none; the monthly cap is
+        # set per account in the web settings), and the model-account balance below which every
+        # page shows a reminder to top up.
+        "daily_budget": 0.0,
+        "balance_alert": 20.0,
         # Answers to the CLI's questions (None: ask). save/show/html/open take
         # true/false; default_analysts is a comma list such as
         # "market,sentiment,news,fundamentals". Command-line flags still win.

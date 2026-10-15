@@ -142,6 +142,10 @@ def create_tier_client(config: dict, tier: str, **extra) -> BaseLLMClient:
     reasoning effort, the name of the output-token cap) and its own endpoint,
     else the provider's default: ``backend_url`` belongs to ``llm_provider``.
     """
+    from . import selfcheck
+
+    if selfcheck.enabled():                      # `tradingagents server selfcheck`: no real model
+        return selfcheck.SelfCheckClient()
     provider = tier_provider(config, tier)
     if provider == config["llm_provider"].lower():
         base_url = config.get(f"{tier}_think_backend_url") or config.get("backend_url")

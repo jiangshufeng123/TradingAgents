@@ -471,3 +471,20 @@ def test_a_kept_report_expires_for_a_day_still_trading(tmp_path, monkeypatch):
     cache.put("market", today, "   ")                                # an empty report is not kept
     assert cache.get("market", today) is None
     assert ReportCache.from_config({"analyst_report_reuse_hours": 0}) is None
+
+
+@pytest.mark.unit
+def test_the_selfcheck_model_carries_a_whole_run(tmp_path, monkeypatch, offline):
+    """`tradingagents server selfcheck` swaps every tier for a stand-in model: a run reaches
+    a decision with it, asking no provider."""
+    from tradingagents.llm_clients import factory, selfcheck
+
+    monkeypatch.setenv(selfcheck.ENV, "1")
+    client = factory.create_tier_client({"llm_provider": "deepseek", "quick_think_llm": "deepseek-flash"}, "quick")
+    assert isinstance(client, selfcheck.SelfCheckClient)
+    monkeypatch.setattr(trading_graph, "create_tier_client", factory.create_tier_client)
+    cfg = copy.deepcopy(DEFAULT_CONFIG)
+    cfg.update(results_dir=str(tmp_path / "results"), data_cache_dir=str(tmp_path / "cache"),
+               memory_log_path=str(tmp_path / "log.md"), llm_provider="deepseek")
+    state, signal = trading_graph.TradingAgentsGraph(config=cfg).propagate("NVDA", TRADE_DATE)
+    assert signal == "Hold" and "Self-check" in state["final_trade_decision"]

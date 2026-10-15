@@ -161,6 +161,7 @@ const ICON = {
   watch: '<path d="M12 4l2.4 5 5.4.6-4 3.7 1.1 5.3L12 16l-4.9 2.6 1.1-5.3-4-3.7 5.4-.6z"/>',
   book: '<path d="M4 7h16v12H4z"/><path d="M8 7V5h8v2M4 12h16"/>',
   sources: '<ellipse cx="12" cy="6" rx="7" ry="2.5"/><path d="M5 6v6c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5V6M5 12v6c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5v-6"/>',
+  score: '<path d="M5 20V11M10 20V5M15 20v-7M20 20V8"/><path d="M3 20h18"/>',
   settings: '<circle cx="12" cy="12" r="3"/><path d="M12 3v2.5M12 18.5V21M3 12h2.5M18.5 12H21M5.6 5.6l1.8 1.8M16.6 16.6l1.8 1.8M5.6 18.4l1.8-1.8M16.6 7.4l1.8-1.8"/>',
 };
 const Icon = {
@@ -622,7 +623,7 @@ const JobsView = {
           <template v-else-if="!estimate">{{ tickers.length }} 只股票，正在估算费用…</template>
           <template v-else-if="estimate.error">{{ estimate.error }}</template>
           <template v-else>{{ estimate.tickers.length }} 只 × {{ estimate.runs }} 次，
-            <template v-if="estimate.estimate != null">预计约 ¥{{ money(estimate.estimate) }}</template><template v-else>还没有历史花费可供估算</template><template v-if="estimate.quota_remaining != null">；本月额度剩余 ¥{{ money(estimate.quota_remaining) }}</template><template v-if="estimate.within_quota === false">，超出额度</template></template>
+            <template v-if="estimate.estimate != null">预计约 ¥{{ money(estimate.estimate) }}</template><template v-else>还没有历史花费可供估算</template><template v-if="estimate.quota_remaining != null">；本月额度剩余 ¥{{ money(estimate.quota_remaining) }}</template><template v-if="estimate.within_quota === false">。{{ estimate.over_budget || '超出额度' }}</template></template>
         </span>
         <button class="btn primary" :disabled="busy || !tickers.length || (estimate && estimate.within_quota === false)">开始分析</button>
       </div>
@@ -1020,6 +1021,143 @@ const SettingsView = {
   </div>`,
 };
 
+// --- scoreboard: how the settled decisions have done -------------------------------------
+// Mean alpha per rating, diverging from zero (up red / down green, the A-share convention);
+// the side of the zero line and the signed label carry the sign as well as the colour.
+const RatingBars = {
+  props: { rows: Array },
+  setup(props) {
+    const hover = ref(null), showTable = ref(false);
+    const ORDER = ["Buy", "Overweight", "Hold", "Underweight", "Sell"];
+    const rows = computed(() => [...(props.rows || [])].sort((a, b) => ORDER.indexOf(a.rating) - ORDER.indexOf(b.rating)));
+    const max = computed(() => Math.max(0.005, ...rows.value.map(r => Math.abs(r.mean_alpha || 0))));
+    // A share of the half-track (--span in the CSS: less on a phone), so the label past the
+    // bar's end always has room.
+    const frac = r => Math.abs(r.mean_alpha || 0) / max.value;
+    const hit = r => r.directional ? `${pct(r.hit_rate, 0)}（${r.right}/${r.directional}）` : "不判方向";
+    return { rows, frac, hover, showTable, hit, ratingName, signed, pct };
+  },
+  template: `<div>
+    <div class="row" style="justify-content:space-between;margin-bottom:10px">
+      <p class="muted small">每个评级的平均超额收益（相对基准），右侧是方向命中率。持有不判方向。</p>
+      <button class="btn quiet small" @click="showTable = !showTable">{{ showTable ? '看图' : '看数据表' }}</button>
+    </div>
+    <div v-if="!showTable" class="rbars" role="list">
+      <div v-for="r in rows" :key="r.rating" class="rbar" role="listitem" tabindex="0"
+           :aria-label="ratingName(r.rating) + '：' + r.count + ' 次，平均超额 ' + signed(r.mean_alpha) + '，命中 ' + hit(r)"
+           @mouseenter="hover = r.rating" @mouseleave="hover = null" @focus="hover = r.rating" @blur="hover = null">
+        <span class="rbar-name">{{ ratingName(r.rating) }}<span class="muted num"> ×{{ r.count }}</span></span>
+        <span class="rbar-track">
+          <span class="rbar-zero"></span>
+          <span class="rbar-fill" :class="(r.mean_alpha || 0) >= 0 ? 'pos' : 'neg'" :style="{ '--f': frac(r) }"></span>
+          <span class="rbar-val num" :class="(r.mean_alpha || 0) >= 0 ? 'pos' : 'neg'" :style="{ '--f': frac(r) }">{{ signed(r.mean_alpha) }}</span>
+        </span>
+        <span class="rbar-hit num">{{ hit(r) }}</span>
+        <div v-if="hover === r.rating" class="tip" style="right:0;top:30px">
+          <div style="margin-bottom:4px">{{ ratingName(r.rating) }}（{{ r.rating }}）</div>
+          <div class="k"><span>决策数</span><span class="num">{{ r.count }}</span></div>
+          <div class="k"><span>平均涨跌</span><span class="num">{{ signed(r.mean_raw) }}</span></div>
+          <div class="k"><span>平均超额</span><span class="num">{{ signed(r.mean_alpha) }}</span></div>
+          <div class="k"><span>方向命中</span><span class="num">{{ hit(r) }}</span></div>
+        </div>
+      </div>
+    </div>
+    <div v-else class="table-wrap"><table class="t"><thead><tr><th>评级</th><th class="r">决策数</th><th class="r">平均涨跌</th><th class="r">平均超额</th><th class="r">方向命中</th></tr></thead>
+      <tbody><tr v-for="r in rows" :key="r.rating"><td>{{ ratingName(r.rating) }}</td><td class="r num">{{ r.count }}</td>
+        <td class="r num">{{ signed(r.mean_raw) }}</td><td class="r num" :class="(r.mean_alpha || 0) > 0 ? 'up' : (r.mean_alpha || 0) < 0 ? 'down' : ''">{{ signed(r.mean_alpha) }}</td>
+        <td class="r num">{{ hit(r) }}</td></tr></tbody></table></div>
+  </div>`,
+};
+
+const ScoreView = {
+  components: { Seal, RatingBars },
+  setup() {
+    const data = ref(null), error = ref("");
+    onMounted(async () => { try { data.value = await api("/scoreboard"); } catch (e) { error.value = e.message; } });
+    const o = computed(() => data.value && data.value.overall);
+    // A decision settles once its holding window has traded: about holding_days trading days later.
+    const firstSettle = computed(() => {
+      const d = data.value; if (!d || !d.pending.length) return "";
+      const t = new Date(d.pending[0].date + "T00:00:00");
+      t.setDate(t.getDate() + Math.ceil(d.holding_days * 7 / 5) + 1);
+      return `${t.getMonth() + 1}月${t.getDate()}日`;
+    });
+    const right = r => r.direction_right === "yes" ? "对" : r.direction_right === "no" ? "错" : "—";
+    return { data, error, o, firstSettle, right, signed, pct, tone, ratingName, when };
+  },
+  template: `<div class="page">
+    <div class="page-head"><div><h1>成绩单</h1><p>每个决策在持有 {{ data ? data.holding_days : 5 }} 个交易日后的表现，与同市场基准相比。所有账户共用同一份决策记录。</p></div></div>
+    <div v-if="error" class="note err">{{ error }}</div>
+    <template v-else-if="data">
+      <div v-if="!o" class="panel board-empty">
+        <p style="font-size:16px;color:var(--ink)">还没有结算的决策</p>
+        <p class="small" style="margin-top:6px">每个决策要等持有期（{{ data.holding_days }} 个交易日）走完才能评分。
+          <template v-if="data.pending.length">现在有 <b class="num">{{ data.pending.length }}</b> 个在等，第一批大约 {{ firstSettle }} 后可以结算。</template>
+          之后每次运行分析时会自动结算，不用另外操作。</p>
+      </div>
+      <template v-else>
+        <div class="kpis">
+          <div class="fact"><span>已结算</span><div class="big num">{{ o.count }}</div>
+            <div class="sub">等待结算 {{ data.pending.length }}<template v-if="data.review_count">，未给评级 {{ data.review_count }}</template></div></div>
+          <div class="fact"><span>方向命中率</span><div class="big num">{{ o.directional ? pct(o.hit_rate, 0) : '—' }}</div>
+            <div class="sub">{{ o.directional ? o.right + ' / ' + o.directional + ' 次看多或看空' : '还没有看多或看空的决策' }}</div></div>
+          <div class="fact"><span>平均超额收益</span><div class="big num" :class="tone(o.mean_alpha)">{{ signed(o.mean_alpha) }}</div>
+            <div class="sub">每个决策相对基准，平均涨跌 {{ signed(o.mean_raw) }}</div></div>
+          <div class="fact" v-if="data.follow"><span>照评级操作 vs 一直持有</span>
+            <div class="pair"><span class="muted small">照评级</span><b class="num" :class="tone(data.follow.follow)">{{ signed(data.follow.follow) }}</b></div>
+            <div class="pair"><span class="muted small">一直持有</span><b class="num" :class="tone(data.follow.hold)">{{ signed(data.follow.hold) }}</b></div>
+            <div class="sub">每个决策平均；照评级＝看多才持有，否则空仓</div></div>
+        </div>
+
+        <section class="section"><h2>按评级</h2><div class="panel panel-body"><RatingBars :rows="data.by_rating"/></div></section>
+
+        <div class="split2">
+          <section class="section"><h2>按股票</h2>
+            <div class="panel table-wrap"><table class="t"><thead><tr><th>股票</th><th class="r">决策</th><th class="r">命中</th><th class="r">平均超额</th></tr></thead>
+              <tbody><tr v-for="r in data.by_ticker" :key="r.ticker"><td><Tk :t="r.ticker"/></td><td class="r num">{{ r.count }}</td>
+                <td class="r num">{{ r.directional ? pct(r.hit_rate, 0) + '（' + r.right + '/' + r.directional + '）' : '—' }}</td>
+                <td class="r num" :class="tone(r.mean_alpha)">{{ signed(r.mean_alpha) }}</td></tr></tbody></table></div></section>
+          <section class="section"><h2>按月份</h2>
+            <div class="panel table-wrap"><table class="t"><thead><tr><th>月份</th><th class="r">决策</th><th class="r">命中</th><th class="r">平均超额</th></tr></thead>
+              <tbody><tr v-for="m in [...data.by_month].reverse()" :key="m.month"><td class="num">{{ m.month }}</td><td class="r num">{{ m.count }}</td>
+                <td class="r num">{{ m.directional ? pct(m.hit_rate, 0) + '（' + m.right + '/' + m.directional + '）' : '—' }}</td>
+                <td class="r num" :class="tone(m.mean_alpha)">{{ signed(m.mean_alpha) }}</td></tr></tbody></table></div></section>
+        </div>
+
+        <section class="section"><h2>最近结算</h2>
+          <div class="panel table-wrap"><table class="t"><thead><tr><th>决策日</th><th>股票</th><th>评级</th><th class="r">涨跌</th><th class="r">超额</th><th class="r">方向</th><th>结算日</th></tr></thead>
+            <tbody><tr v-for="r in data.recent" :key="r.date + r.ticker"><td class="num when">{{ r.date }}</td><td><Tk :t="r.ticker"/></td>
+              <td><span class="seal-cell"><Seal :rating="r.rating" small/>{{ ratingName(r.rating) }}</span></td>
+              <td class="r num" :class="tone(r.raw_return)">{{ signed(r.raw_return) }}</td><td class="r num" :class="tone(r.alpha_return)">{{ signed(r.alpha_return) }}</td>
+              <td class="r">{{ right(r) }}</td><td class="num muted when">{{ r.resolved || '—' }}</td></tr></tbody></table></div></section>
+      </template>
+
+      <section class="section" v-if="data.pending.length"><h2>等待结算 <span class="muted num" style="font-weight:400">{{ data.pending.length }}</span></h2>
+        <div class="panel table-wrap"><table class="t"><thead><tr><th>决策日</th><th>股票</th><th>评级</th></tr></thead>
+          <tbody><tr v-for="r in [...data.pending].reverse().slice(0, 30)" :key="r.date + r.ticker"><td class="num">{{ r.date }}</td><td><Tk :t="r.ticker"/></td>
+            <td><span class="seal-cell"><Seal :rating="r.rating" small/>{{ ratingName(r.rating) }}</span></td></tr></tbody></table></div></section>
+
+      <section class="section" v-if="data.review_count"><h2>未给出评级 <span class="muted num" style="font-weight:400">{{ data.review_count }}</span></h2>
+        <p class="muted small" style="margin-bottom:10px">组合经理的回答里读不出评级，这些决策不计分。偶尔出现正常；如果变多，说明模型输出不稳定，值得检查。</p>
+        <div class="panel table-wrap"><table class="t"><thead><tr><th>决策日</th><th>股票</th></tr></thead>
+          <tbody><tr v-for="r in data.review" :key="r.date + r.ticker"><td class="num">{{ r.date }}</td><td><Tk :t="r.ticker"/></td></tr></tbody></table></div></section>
+
+      <section class="section"><h2>学到的规则</h2>
+        <div v-if="!data.beliefs.length" class="panel board-empty"><p>还没有。每结算一批决策（默认 5 个），系统会对照对错重写一次规则，研究经理和组合经理在之后的分析里会参考。</p></div>
+        <div v-else class="panel panel-body">
+          <p class="muted small" style="margin-bottom:10px">依据 <b class="num">{{ data.beliefs[0].based_on }}</b> 个已结算决策，{{ (data.beliefs[0].created || '').slice(0, 10) }} 修订。研究经理和组合经理在分析时会参考这些规则。</p>
+          <div class="beliefs">{{ data.beliefs[0].beliefs }}</div>
+          <details v-if="data.beliefs.length > 1" style="margin-top:14px"><summary class="small">以前的版本（{{ data.beliefs.length - 1 }}）</summary>
+            <div v-for="b in data.beliefs.slice(1)" :key="b.created" style="margin-top:12px">
+              <p class="muted small">{{ (b.created || '').slice(0, 10) }}，依据 {{ b.based_on }} 个决策</p><div class="beliefs">{{ b.beliefs }}</div></div>
+          </details>
+        </div>
+      </section>
+    </template>
+    <div v-else class="muted">正在读取…</div>
+  </div>`,
+};
+
 // --- "more" (phones: the pages the bottom bar has no room for) ---------------------------
 const MoreView = {
   components: { Icon },
@@ -1031,6 +1169,7 @@ const MoreView = {
     <div class="page-head"><div><h1>更多</h1><p>{{ store.me.display_name || store.me.username }}</p></div></div>
     <div class="panel nav" style="padding:6px">
       <a href="#/watchlist"><Icon name="watch"/>自选股</a>
+      <a href="#/score"><Icon name="score"/>成绩单</a>
       <a href="#/sources"><Icon name="sources"/>数据源</a>
       <a href="#/settings"><Icon name="settings"/>设置</a>
     </div>
@@ -1041,18 +1180,20 @@ const MoreView = {
 // --- the shell ---------------------------------------------------------------------------
 const NAV = [
   ["overview", "总览", "overview"], ["screen", "选股", "screen"], ["jobs", "分析", "jobs"],
-  ["watchlist", "自选股", "watch"], ["book", "持仓", "book"], ["sources", "数据源", "sources"], ["settings", "设置", "settings"],
+  ["watchlist", "自选股", "watch"], ["book", "持仓", "book"], ["score", "成绩单", "score"], ["sources", "数据源", "sources"], ["settings", "设置", "settings"],
 ];
 const MOBILE = [["overview", "总览", "overview"], ["screen", "选股", "screen"], ["jobs", "分析", "jobs"],
                 ["book", "持仓", "book"], ["more", "更多", "settings"]];
 
 const App = {
-  components: { Icon, LoginView, OverviewView, ScreenView, JobsView, JobDetailView, WatchlistView, BookView, SourcesView, SettingsView, MoreView },
+  components: { Icon, LoginView, OverviewView, ScreenView, JobsView, JobDetailView, WatchlistView, BookView, ScoreView, SourcesView, SettingsView, MoreView },
   setup() {
     onMounted(async () => {
       try { store.me = await api("/me"); } catch (e) { /* not signed in */ }
       store.ready = true;
-      if (store.me) api("/balance").then(b => { store.balance = b; }).catch(() => {});
+      const loadBalance = () => { if (store.me) api("/balance").then(b => { store.balance = b; }).catch(() => {}); };
+      loadBalance();
+      setInterval(loadBalance, 10 * 60 * 1000);           // the low-balance reminder follows spending
       refreshActive();
       setInterval(refreshActive, 6000);
     });
@@ -1063,7 +1204,7 @@ const App = {
       const r = store.route;
       if (r.name === "jobs" && r.arg) return "JobDetailView";
       return { overview: "OverviewView", screen: "ScreenView", jobs: "JobsView", watchlist: "WatchlistView",
-               book: "BookView", sources: "SourcesView", settings: "SettingsView", more: "MoreView" }[r.name] || "OverviewView";
+               book: "BookView", score: "ScoreView", sources: "SourcesView", settings: "SettingsView", more: "MoreView" }[r.name] || "OverviewView";
     });
     const balanceText = computed(() => {
       const b = store.balance; if (!b || !b.ok) return "";
@@ -1072,7 +1213,13 @@ const App = {
     const focusMain = () => { const m = document.getElementById("main"); if (m) m.focus(); };
     // a route change moves focus to the new page, so keyboard and screen-reader users start at its top
     watch(() => store.route, () => nextTick(focusMain));
-    return { store, view, logout, NAV, MOBILE, balanceText, focusMain, badge, me: computed(() => store.me) };
+    const lowBalance = computed(() => {
+      const b = store.balance; if (!b || !b.low) return "";
+      const x = b.balances.find(y => y.total != null) || {};
+      const cur = x.currency === "CNY" ? "¥" : (x.currency || "") + " ";
+      return `模型账户余额只剩 ${cur}${money(x.total)}，低于提醒线 ${cur}${money(b.alert_at)}。余额用完后分析会失败，请及时充值。`;
+    });
+    return { store, view, logout, NAV, MOBILE, balanceText, lowBalance, focusMain, badge, me: computed(() => store.me) };
   },
   template: `
     <template v-if="!store.ready"></template>
@@ -1087,14 +1234,15 @@ const App = {
         </div>
         <div class="rail-foot">
           <div class="who"><span>{{ store.me.display_name || store.me.username }}</span><button class="linkish small" @click="logout">退出</button></div>
-          <div class="bal num">{{ balanceText }}</div>
+          <div class="bal num" :class="lowBalance && 'warn-text'">{{ balanceText }}</div>
         </div>
       </nav>
       <main class="main" id="main" tabindex="-1">
+        <div v-if="lowBalance" class="note warn banner" role="status">{{ lowBalance }}</div>
         <component :is="view" :key="store.route.name + (store.route.arg || '')" :id="store.route.arg"/>
       </main>
       <nav class="bottombar" aria-label="主导航">
-        <a v-for="[k, label, icon] in MOBILE" :key="k" :href="'#/' + k" :class="(store.route.name === k || (k === 'more' && ['watchlist','sources','settings'].includes(store.route.name))) && 'on'"><Icon :name="icon"/>{{ label }}</a>
+        <a v-for="[k, label, icon] in MOBILE" :key="k" :href="'#/' + k" :class="(store.route.name === k || (k === 'more' && ['watchlist','score','sources','settings'].includes(store.route.name))) && 'on'"><Icon :name="icon"/>{{ label }}</a>
       </nav>
     </div>
     <div class="toasts" aria-live="polite"><div v-for="t in store.toasts" :key="t.id" class="toast" :class="t.kind" :role="t.kind === 'err' ? 'alert' : 'status'">{{ t.text }}</div></div>`,

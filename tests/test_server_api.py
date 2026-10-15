@@ -125,7 +125,7 @@ def test_analysis_job_estimate_quota_and_isolation(app, env):
     amy = _client(app, "amy", "user-pass-1")
     assert amy.get(f"/api/jobs/{job['id']}").status_code == 404
     r = amy.post("/api/analyses", json={"tickers": ["NVDA"], "runs": 1}, headers=H)
-    assert r.status_code == 402 and "quota" in r.json()["detail"]
+    assert r.status_code == 402 and "本月额度" in r.json()["detail"]
     assert ian.post(f"/api/jobs/{job['id']}/cancel", headers=H).json()["status"] == "cancelled"
     assert ian.post(f"/api/jobs/{job['id']}/cancel", headers=H).status_code == 409
 
@@ -261,8 +261,10 @@ def test_analysis_runner_end_to_end_with_a_stand_in_batch(env, monkeypatch, tmp_
     nothing = tmp_path / "nothing.py"
     nothing.write_text("print('600668.SS failed: boom')\n", encoding="utf-8")
     monkeypatch.setattr(runner, "analysis_command", lambda params, pf: [sys.executable, str(nothing)])
+    with db.session() as s:
+        empty_job = jobs.create(s, 1, "analysis", {"tickers": ["600668.SS"], "runs": 1})
     with pytest.raises(RuntimeError, match="no ticker produced a result"):
-        runner.run_analysis(job, user, env, lambda: False, poll=0.05)
+        runner.run_analysis(empty_job, user, env, lambda: False, poll=0.05)
 
     slow = tmp_path / "slow.py"
     slow.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
@@ -319,7 +321,7 @@ def test_schedule_and_daily_queue(app, env):
     assert jid and woke == [1]
     assert scheduler.queue_daily(1) is None                   # the previous one is still queued
     with db.session() as s:
-        assert s.get(Job, jid).params == {"tickers": ["NVDA"], "runs": 2, "scheduled": True}
+        assert s.get(Job, jid).params == {"tickers": ["NVDA"], "runs": 2, "scheduled": True, "estimate": None}
     sch = scheduler.DailyScheduler()
     sch.start()
     try:
@@ -461,3 +463,85 @@ def test_ledger_row_records_the_service_job(monkeypatch):
     assert "job_id" in LEDGER_FIELDS and ledger_row(summary, **kw)["job_id"] == "42"
     monkeypatch.delenv("TRADINGAGENTS_JOB_ID")
     assert ledger_row(summary, **kw)["job_id"] == ""
+
+
+@pytest.mark.unit
+def test_scoreboard_page_data(app, env, monkeypatch, tmp_path):
+    import json
+
+    from tradingagents.memory import TradingMemoryLog
+
+    def e(date, ticker, rating, raw=None, alpha=None):
+        return {"date": date, "ticker": ticker, "rating": rating, "pending": raw is None,
+                "raw": raw, "alpha": alpha, "holding": "5d", "resolved": "2026-10-20" if raw else None}
+
+    entries = [e("2026-09-01", "600519.SS", "Buy", "+4.0%", "+2.0%"),
+               e("2026-09-02", "600519.SS", "Sell", "+1.0%", "+0.5%"),       # wrong direction
+               e("2026-10-08", "0700.HK", "Hold", "-1.0%", "-0.5%"),
+               e("2026-10-15", "603980.SS", "Underweight"),                   # pending
+               e("2026-10-15", "000960.SZ", "REVIEW")]
+    monkeypatch.setattr(TradingMemoryLog, "load_entries", lambda self: entries)
+    beliefs = tmp_path / "memory" / "beliefs.json"
+    beliefs.parent.mkdir(parents=True)
+    beliefs.write_text(json.dumps([{"created": "2026-10-10T10:00", "as_of": "2026-10-09", "based_on": 3,
+                                    "beliefs": "- 量能不足时少给买入"}]), encoding="utf-8")
+    app_ = __import__("server.app", fromlist=["create_app"]).create_app(
+        {**env, "memory_log_path": str(tmp_path / "memory" / "log.md")}, start_worker=False, start_scheduler=False)
+    out = _client(app_).get("/api/scoreboard").json()
+
+    assert out["overall"]["count"] == 3 and out["overall"]["directional"] == 2 and out["overall"]["right"] == 1
+    assert [r["rating"] for r in out["by_rating"]] == ["Buy", "Hold", "Sell"]
+    assert [m["month"] for m in out["by_month"]] == ["2026-09", "2026-10"]
+    assert out["recent"][0]["ticker"] == "0700.HK" and out["recent"][-1]["direction_right"] == "yes"
+    assert [p["ticker"] for p in out["pending"]] == ["603980.SS"] and out["review_count"] == 1
+    assert out["beliefs"][0]["based_on"] == 3 and "量能" in out["beliefs"][0]["beliefs"]
+    assert out["follow"]["follow"] == pytest.approx(0.04 / 3) and out["holding_days"] == 5
+
+
+@pytest.mark.unit
+def test_daily_cap_and_the_scheduled_run_are_held_to_the_caps(app, env):
+    """A daily cap shared by every account (TRADINGAGENTS_DAILY_BUDGET), and the scheduled run
+    held to the caps like a run from the page: over one, it is recorded as failed, saying why."""
+    from datetime import datetime
+
+    from server import scheduler
+    from server.app import create_app
+    from sqlalchemy import select
+
+    from server.models import CostEntry
+    from server.services import costs
+
+    with db.session() as s:
+        s.add(CostEntry(user_id=1, run_time=datetime.now(), ticker="X", cost=2.5))
+        watchlist.add(s, 1, ["NVDA"])
+    _ledger(runner.reports_base(env) / "cost_ledger.csv",
+            [{"run_time": "2026-10-14 18:40:00", "ticker": "X", "cost": "1.0", "vote_runs": "1"}])
+    capped = {**env, "daily_budget": 3.0}
+    ian = _client(create_app(capped, start_worker=False, start_scheduler=False))
+    est = ian.post("/api/analyses/estimate", json={"tickers": ["NVDA"], "runs": 1}, headers=H).json()
+    assert est["within_quota"] is False and "今天的额度只剩 ¥0.50" in est["over_budget"]
+    assert est["quota_remaining"] == pytest.approx(0.5)
+    r = ian.post("/api/analyses", json={"tickers": ["NVDA"], "runs": 1}, headers=H)
+    assert r.status_code == 402 and "今天的额度" in r.json()["detail"]
+
+    assert scheduler.queue_daily(1, config=capped) is None
+    with db.session() as s:
+        last = s.scalars(select(Job).order_by(Job.id.desc())).first()
+        assert last.status == "failed" and last.error.startswith("定时分析没有运行：今天的额度")
+        assert costs.check_budget(s, s.get(User, 1), 0.4, capped)[0] is True
+    assert scheduler.queue_daily(1, config=env)                     # no daily cap: it queues
+
+
+@pytest.mark.unit
+def test_low_balance_is_flagged(app, env, monkeypatch):
+    from server.app import create_app
+    from tradingagents import llm_balance
+
+    monkeypatch.setattr(llm_balance, "supported", lambda provider: True)
+    monkeypatch.setattr(llm_balance, "balance", lambda provider, **k: {
+        "provider": "deepseek", "ok": True, "balances": [{"currency": "CNY", "total": 12.3}]})
+    low = _client(create_app({**env, "balance_alert": 20}, start_worker=False, start_scheduler=False))
+    out = low.get("/api/balance").json()
+    assert out["low"] is True and out["alert_at"] == 20
+    off = _client(create_app({**env, "balance_alert": 0}, start_worker=False, start_scheduler=False))
+    assert off.get("/api/balance").json()["low"] is False

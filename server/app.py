@@ -291,9 +291,15 @@ def create_app(config: dict | None = None, *, start_worker: bool = True, start_s
         path = _report_path(user, dir, fmt)
         return FileResponse(path, media_type="text/html" if fmt == "html" else "text/markdown")
 
+    from server.version import fingerprint, settings
+
+    started = {"at": _iso(datetime.now()), "code": fingerprint(), "settings": settings(config)}
+
     @app.get("/api/health")
     def health():
-        return {"ok": True, "time": _iso(datetime.now())}
+        """Also which code and settings this service started with (`tradingagents server selfcheck`)."""
+        return {"ok": True, "time": _iso(datetime.now()), "started": started["at"],
+                "code": started["code"], "settings": started["settings"]}
 
     @app.post("/api/auth/login")
     def login(body: LoginIn, request: Request, response: Response):
@@ -367,7 +373,16 @@ def create_app(config: dict | None = None, *, start_worker: bool = True, start_s
         provider = (config.get("quick_think_provider") or config.get("llm_provider") or "").lower()
         if not llm_balance.supported(provider):
             return {"provider": provider, "ok": False, "error": "this provider publishes no balance"}
-        return llm_balance.balance(provider)
+        out = llm_balance.balance(provider)
+        # Below the alert line (TRADINGAGENTS_BALANCE_ALERT), every page reminds to top up.
+        try:
+            alert = float(config.get("balance_alert") or 0)
+        except (TypeError, ValueError):
+            alert = 0.0
+        totals = [b.get("total") for b in (out.get("balances") or []) if b.get("total") is not None]
+        out["alert_at"] = alert or None
+        out["low"] = bool(out.get("ok") and alert > 0 and totals and max(totals) < alert)
+        return out
 
     @app.get("/api/names")
     def security_names(t: str = "", user: User = Depends(current_user)):
@@ -579,6 +594,13 @@ def create_app(config: dict | None = None, *, start_worker: bool = True, start_s
         runs = body.runs or int(config.get("vote_runs") or 1)
         return {"tickers": tickers, "runs": runs, "date": body.date}
 
+    @app.get("/api/scoreboard")
+    def scoreboard_get(user: User = Depends(current_user)):
+        """How the settled decisions have done (shared by all accounts, like the memory log)."""
+        from server.services import scoreboard as scoreboard_svc
+
+        return scoreboard_svc.payload(config)
+
     @app.get("/api/analyses/defaults")
     def analysis_defaults(user: User = Depends(current_user)):
         """What an analysis uses when the form leaves a field empty (from .env at service start)."""
@@ -591,9 +613,9 @@ def create_app(config: dict | None = None, *, start_worker: bool = True, start_s
         params = _analysis_params(body, user)
         est = estimate(config, user, params["tickers"], params["runs"])
         with db.session() as s:
-            ok, remaining = costs.within_quota(s, s.get(User, user.id), est or 0.0)
+            ok, remaining, why = costs.check_budget(s, s.get(User, user.id), est or 0.0, config)
         return {**params, "estimate": est, "currency": config.get("price_currency") or "",
-                "within_quota": ok, "quota_remaining": remaining}
+                "within_quota": ok, "quota_remaining": remaining, "over_budget": why}
 
     @app.post("/api/analyses")
     def analysis_create(body: AnalysisIn, user: User = Depends(current_user)):
@@ -602,10 +624,9 @@ def create_app(config: dict | None = None, *, start_worker: bool = True, start_s
         params = _analysis_params(body, user)
         est = estimate(config, user, params["tickers"], params["runs"])
         with db.session() as s:
-            ok, remaining = costs.within_quota(s, s.get(User, user.id), est or 0.0)
+            ok, remaining, why = costs.check_budget(s, s.get(User, user.id), est or 0.0, config)
             if not ok:
-                raise HTTPException(402, f"estimated cost {est:.2f} exceeds this month's remaining quota "
-                                         f"{remaining:.2f}")
+                raise HTTPException(402, why)
             job = jobs.create(s, user.id, "analysis", {**params, "estimate": est})
             out = _job_out(job)
         _wake()

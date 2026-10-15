@@ -318,6 +318,10 @@ def daily(
 
 def _print_balance() -> None:
     """The model account's remaining balance, when the provider publishes one (never fails a run)."""
+    from tradingagents.llm_clients import selfcheck
+
+    if selfcheck.enabled():            # no real model was used
+        return
     try:
         from tradingagents import llm_balance
 
@@ -659,8 +663,12 @@ def server_run(
             console.print(f"  {names[kind]:<36} http://{addr}:{port}")
         console.print(f"[dim]Accepted from: {', '.join(str(n) for n in nets)} "
                       "(TRADINGAGENTS_ALLOWED_NETS). Use strong passwords.[/dim]")
-    uvicorn.run(create_app(DEFAULT_CONFIG, start_worker=worker, start_scheduler=scheduler),
-                host=host, port=port, log_level="info")
+    from server.logs import quiet_access_log
+
+    app_ = create_app(DEFAULT_CONFIG, start_worker=worker, start_scheduler=scheduler)
+    config = uvicorn.Config(app_, host=host, port=port, log_level="info")
+    quiet_access_log()          # after uvicorn sets up its loggers: no line per successful GET
+    uvicorn.Server(config).run()
 
 
 SERVER_TASK = "TradingAgents Server"
@@ -836,6 +844,131 @@ def service_status(port: int = typer.Option(8000, "--port")):
             console.print(f"[green]The service answers on port {port}.[/green] {resp.read().decode()[:80]}")
     except Exception as exc:
         console.print(f"[yellow]Nothing answers on port {port}: {exc}[/yellow]")
+
+
+@server_app.command("selfcheck")
+def server_selfcheck(
+    ticker: str = typer.Option("600519.SS", "--ticker", help="Listing the offline analysis runs on"),
+    port: int = typer.Option(8000, "--port"),
+):
+    """Check before restarting: an offline analysis end to end, the running service's code and
+    settings, and the data sources. Costs nothing: no model is asked."""
+    import os
+    import subprocess
+    import sys
+    import tempfile
+    import time
+    import urllib.request
+    from pathlib import Path
+
+    from rich.table import Table
+
+    from server.version import fingerprint, settings
+    from tradingagents.llm_clients.api_key_env import get_api_key_env
+
+    rows: list[tuple[str, str, str]] = []            # (check, PASS/WARN/FAIL, detail)
+
+    # 1. Settings as this window reads .env now, and the model key (presence only).
+    now = settings(DEFAULT_CONFIG)
+    rows.append(("设置（.env）", "PASS", "，".join(f"{k}={v}" for k, v in now.items())))
+    keys = {get_api_key_env(DEFAULT_CONFIG.get(f"{t}_think_provider") or DEFAULT_CONFIG.get("llm_provider") or "")
+            for t in ("quick", "deep")} - {None}
+    missing = sorted(k for k in keys if not os.environ.get(k))
+    rows.append(("模型密钥", "FAIL" if missing else "PASS",
+                 ("没有设置：" + "、".join(missing)) if missing else "已设置：" + "、".join(sorted(keys))))
+
+    # 2. A whole analysis through the command line, with the stand-in model, in a folder of its own.
+    work = Path(tempfile.mkdtemp(prefix="ta-selfcheck-"))
+    env = dict(os.environ)
+    env.update({
+        "TRADINGAGENTS_SELFCHECK": "1", "TRADINGAGENTS_PLAIN_PROGRESS": "1",
+        "TRADINGAGENTS_REPORTS_DIR": str(work / "reports"), "TRADINGAGENTS_RESULTS_DIR": str(work / "results"),
+        "TRADINGAGENTS_CACHE_DIR": str(work / "cache"),
+        "TRADINGAGENTS_MEMORY_LOG_PATH": str(work / "memory" / "trading_memory.md"),
+        "TRADINGAGENTS_PAPER_TRADING": "false", "TRADINGAGENTS_PAPER_DIR": str(work / "paper"),
+        "TRADINGAGENTS_REPORT_REUSE_HOURS": "0", "TRADINGAGENTS_DAILY_SCREEN": "",
+        "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1", "PYTHONUNBUFFERED": "1", "NO_COLOR": "1",
+    })
+    for key in missing:                              # the stand-in model needs none; the CLI asks
+        env[key] = "selfcheck"
+    console.print(f"离线分析 {ticker}（不调用模型，约 1 分钟）…")
+    started = time.time()
+    try:
+        out = subprocess.run([sys.executable, "-m", "cli.main", "daily", ticker, "--no-portfolio", "--runs", "1"],
+                             cwd=_project_dir(), env=env, capture_output=True, text=True,
+                             encoding="utf-8", errors="replace", timeout=600)
+        log, code = (out.stdout or "") + (out.stderr or ""), out.returncode
+    except subprocess.TimeoutExpired as exc:
+        log, code = str(exc.stdout or ""), "timeout"
+    (work / "selfcheck.log").write_text(log, encoding="utf-8")
+    reports = list((work / "reports").rglob("complete_report.html"))
+    ledger = work / "reports" / "cost_ledger.csv"
+    problems = []
+    if code != 0:
+        problems.append(f"退出码 {code}")
+    if "Analyzed 1/1" not in log:
+        problems.append("没有得出结论")
+    if not reports:
+        problems.append("没有生成报告")
+    if not ledger.exists():
+        problems.append("没有写花费记录")
+    if "[进度" not in log:
+        problems.append("没有进度输出")
+    took = f"{time.time() - started:.0f} 秒"
+    rows.append(("离线分析", "FAIL" if problems else "PASS",
+                 ("；".join(problems) + f"。完整输出：{work / 'selfcheck.log'}") if problems
+                 else f"命令行→分析→报告→花费记录都正常（{took}）"))
+    if problems:
+        tail = [line for line in log.splitlines() if line.strip()][-25:]
+        console.print("[red]离线分析的最后输出：[/red]\n" + "\n".join(tail))
+
+    # 3. The running service: is it on the code and settings now on disk?
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=5) as resp:
+            import json as _json
+
+            health = _json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:
+        health = None
+        rows.append(("服务", "WARN", f"端口 {port} 没有回应（{type(exc).__name__}）：服务没在运行？"))
+    if health is not None:
+        if not health.get("code"):
+            rows.append(("服务代码", "WARN", "服务是加入自检之前的版本：重启后才能比对"))
+        elif health["code"] != fingerprint():
+            rows.append(("服务代码", "WARN", f"服务（{health.get('started')} 启动）运行的不是磁盘上的最新代码：需要重启"))
+        else:
+            rows.append(("服务代码", "PASS", f"与磁盘上的代码一致（{health.get('started')} 启动）"))
+        theirs = health.get("settings") or {}
+        changed = [k for k in now if k in theirs and theirs[k] != now[k]]
+        if theirs and changed:
+            rows.append(("服务设置", "WARN", "与 .env 不同，重启后生效：" +
+                         "，".join(f"{k} {theirs[k]}→{now[k]}" for k in changed)))
+        elif theirs:
+            rows.append(("服务设置", "PASS", "与 .env 一致"))
+
+    # 4. Data sources: any the gateway is skipping right now.
+    try:
+        from tradingagents.datagw import gateway
+
+        skipped = [f"{r['title']}·{r['label']}" for r in gateway(DEFAULT_CONFIG).status() if r["state"] == "open"]
+        rows.append(("数据源", "WARN" if skipped else "PASS",
+                     ("暂时跳过：" + "、".join(skipped)) if skipped else "没有被跳过的数据源"))
+    except Exception as exc:
+        rows.append(("数据源", "WARN", f"读不到状态：{exc}"))
+
+    table = Table(show_lines=False)
+    table.add_column("检查", no_wrap=True)
+    table.add_column("结果", no_wrap=True)
+    table.add_column("说明", overflow="fold")
+    style = {"PASS": "green", "WARN": "yellow", "FAIL": "red"}
+    for name, state, detail in rows:
+        table.add_row(name, f"[{style[state]}]{state}[/{style[state]}]", detail)
+    console.print(table)
+    if any(state == "FAIL" for _, state, _ in rows):
+        console.print("[red]有检查没通过：先别重启服务，把上面的输出发给 Claude。[/red]")
+        raise typer.Exit(code=1)
+    restart = any(name in ("服务代码", "服务设置") and state == "WARN" for name, state, _ in rows)
+    console.print("[green]自检通过。[/green]" + ("可以重启服务：tradingagents server service install" if restart else ""))
 
 
 @server_app.command("firewall")
