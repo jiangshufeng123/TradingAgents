@@ -274,6 +274,7 @@ def daily(
                 _print_fills(fills)
         except Exception as exc:
             console.print(f"[yellow]Paper account update failed: {exc}[/yellow]")
+    _prefetch(names, base["date"])
     done, failed, results = [], [], []
     for index, ticker in enumerate(names, 1):
         console.rule(f"[bold cyan]{index}/{len(names)} {ticker} {base['date']}")
@@ -314,6 +315,53 @@ def daily(
         console.print(f"[yellow]failed:[/yellow] {ticker}: {reason}")
     _print_balance()
     console.print("Decisions are in the memory log; run [bold]tradingagents scoreboard[/bold] once they have settled.")
+
+
+def _prefetch(names: list[str], as_of: str, workers: int = 4) -> list[tuple[str, str]]:
+    """Fetch every ticker's prices (and names) before the analyses start, a few at a time.
+
+    The analyses then read them from the cache instead of each downloading on its own, and a
+    listing no source can serve shows up front rather than half-way through a batch. Never
+    fails the batch: returns (ticker, reason) for those it could not fetch."""
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+    from datetime import datetime
+
+    from tradingagents.dataflows.config import run_config
+    from tradingagents.dataflows.vendors.yahoo.ohlcv import load_ohlcv
+    from tradingagents.llm_clients import selfcheck
+
+    if selfcheck.enabled() or not names:
+        return []
+    started = time.time()
+
+    def one(ticker: str):
+        with run_config(DEFAULT_CONFIG):
+            data = load_ohlcv(ticker, as_of)
+        return len(data), (str(data["Date"].iloc[-1].date()) if len(data) else "-")
+
+    failed = []
+    with ThreadPoolExecutor(max_workers=max(1, min(workers, len(names)))) as pool:
+        futures = {t: pool.submit(one, t) for t in names}
+        for ticker, future in futures.items():
+            try:
+                rows, last = future.result()
+                console.print(f"{datetime.now():%H:%M:%S} [预取] {ticker} 价格就绪：{rows} 个交易日，最新 {last}",
+                              highlight=False)
+            except Exception as exc:
+                failed.append((ticker, f"{type(exc).__name__}: {exc}"[:160]))
+                console.print(f"{datetime.now():%H:%M:%S} [预取] [yellow]{ticker} 取价格失败：{exc}[/yellow]",
+                              highlight=False)
+    try:
+        from tradingagents.names import names_for
+
+        with run_config(DEFAULT_CONFIG):
+            names_for(names)
+    except Exception:
+        pass
+    console.print(f"{datetime.now():%H:%M:%S} [预取] {len(names) - len(failed)}/{len(names)} 只股票的价格已就绪"
+                  f"（{time.time() - started:.0f} 秒）", highlight=False)
+    return failed
 
 
 def _print_balance() -> None:
@@ -1105,6 +1153,23 @@ def datasource_check(
             console.print(f"  {p.label:<12} [{style}]{state:<15}[/{style}] {took:5.1f}s  {detail[:90]}")
     if not spot:
         console.print("[dim]Whole-market quotes not checked; add --spot to include them.[/dim]")
+
+
+@data_app.command("prefetch")
+def datasource_prefetch(
+    tickers: str = typer.Argument(None, help="Comma-separated tickers; omit for the watchlist"),
+    date: str = typer.Option(None, "--date", help="As-of date, YYYY-MM-DD; default today"),
+):
+    """Fetch prices for the watchlist now (as `daily` does before its analyses)."""
+    from datetime import date as _date
+
+    names = _watchlist(tickers)
+    if not names:
+        console.print("[red]No tickers: pass them or set a watchlist.[/red]")
+        raise typer.Exit(code=1)
+    failed = _prefetch(names, date or _date.today().isoformat())
+    if failed:
+        raise typer.Exit(code=1)
 
 
 @data_app.command("reset")

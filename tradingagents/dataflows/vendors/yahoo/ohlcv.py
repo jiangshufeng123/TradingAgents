@@ -229,6 +229,98 @@ def _cache_is_fresh(data_file, as_of_dt, now) -> bool:
     return as_of_dt.date() < now.date() or (now - written).total_seconds() <= OHLCV_CACHE_TTL_SECONDS
 
 
+# --- incremental refresh and an offline fallback -----------------------------------------
+# A refresh downloads only the last few weeks and joins them to the cached years, unless the
+# overlap shows the history was re-adjusted (a dividend or split re-scales every adjusted
+# price before it): then the whole range is downloaded again, as before.
+INCREMENTAL_OVERLAP_DAYS = 21
+INCREMENTAL_MIN_OVERLAP = 3
+INCREMENTAL_TOLERANCE = 1e-4
+
+
+def _download(ticker, start_str: str, end_str: str):
+    downloaded = yf_retry(lambda: ticker.history(start=start_str, end=end_str, auto_adjust=True, actions=False))
+    if downloaded is None:
+        return None
+    downloaded = _ensure_date_column(downloaded.reset_index())
+    if downloaded.empty or "Close" not in downloaded.columns:
+        return None
+    return downloaded
+
+
+def _incremental(ticker, cached: pd.DataFrame, end_str: str) -> pd.DataFrame | None:
+    """The cache with its last weeks replaced by a fresh download; None when a full download
+    is needed (too little cached, nothing to compare, or the history was re-adjusted)."""
+    if cached is None or len(cached) < 30 or "Close" not in cached.columns:
+        return None
+    dates = _normalize_dates(cached["Date"])
+    if dates.isna().any() or not dates.is_monotonic_increasing:
+        return None
+    start = dates.iloc[-1] - pd.Timedelta(days=INCREMENTAL_OVERLAP_DAYS)
+    recent = _download(ticker, start.strftime("%Y-%m-%d"), end_str)
+    if recent is None:
+        return None
+    recent_dates = _normalize_dates(recent["Date"])
+    if recent_dates.isna().any():
+        return None
+    # Compare settled bars only: the newest cached rows may have been a session still trading.
+    old = pd.Series(pd.to_numeric(cached["Close"], errors="coerce").to_numpy(), index=dates.to_numpy())
+    new = pd.Series(pd.to_numeric(recent["Close"], errors="coerce").to_numpy(), index=recent_dates.to_numpy())
+    old = old.iloc[:-2]
+    common = old.index.intersection(new.index)
+    common = [d for d in common if pd.notna(old[d]) and pd.notna(new[d])]
+    if len(common) < INCREMENTAL_MIN_OVERLAP:
+        return None
+    for day in common:
+        a, b = float(old[day]), float(new[day])
+        if abs(a - b) > INCREMENTAL_TOLERANCE * max(abs(a), abs(b), 1e-9):
+            return None                       # re-adjusted since the cache was written
+    keep = cached[(dates < recent_dates.iloc[0]).to_numpy()]
+    return pd.concat([keep, recent], ignore_index=True)
+
+
+def _offline(canonical: str, cached: pd.DataFrame | None, now: pd.Timestamp, reason: Exception):
+    """Prices when Yahoo cannot be reached: the cached download, extended (A-shares and
+    Hong Kong) by the sessions since from the domestic sources; for a listing never
+    cached, those sources' bars alone. None when there is nothing to offer.
+
+    The added bars are unadjusted, the cached ones adjusted to their download day: they
+    agree unless a dividend or split fell in between. Nothing here is written to the cache,
+    so the next successful download replaces it."""
+    from tradingagents.dataflows.vendors import akshare_cn
+
+    domestic = akshare_cn.is_cn_or_hk(canonical)
+    if cached is not None and not cached.empty and "Close" in cached.columns:
+        data = cached
+        if domestic:
+            last = _normalize_dates(cached["Date"]).max()
+            if pd.notna(last) and last.normalize() < now.normalize():
+                try:
+                    bars, source = akshare_cn.daily_bars(canonical, last + pd.Timedelta(days=1), now)
+                except Exception as exc:
+                    bars, source = pd.DataFrame(), ""
+                    logger.debug("%s: domestic bars failed: %s", canonical, exc)
+                if not bars.empty:
+                    data = pd.concat([cached, bars[["Date", "Open", "High", "Low", "Close", "Volume"]]],
+                                     ignore_index=True)
+                    logger.warning("%s: Yahoo unreachable (%s); using the cached prices through %s and "
+                                   "%d later session(s) from %s", canonical, reason, last.date(), len(bars), source)
+                    return data
+        logger.warning("%s: Yahoo unreachable (%s); using the cached prices", canonical, reason)
+        return data
+    if domestic:
+        try:
+            bars, source = akshare_cn.daily_bars(canonical, now - pd.DateOffset(years=5), now)
+        except Exception as exc:
+            logger.debug("%s: domestic bars failed: %s", canonical, exc)
+            return None
+        if not bars.empty:
+            logger.warning("%s: Yahoo unreachable (%s); using unadjusted daily bars from %s",
+                           canonical, reason, source)
+            return bars[["Date", "Open", "High", "Low", "Close", "Volume"]]
+    return None
+
+
 def load_ohlcv(symbol: str, as_of_date: str, fill_gaps: bool = True) -> pd.DataFrame:
     """Fetch OHLCV data with caching, filtered to prevent look-ahead bias.
 
@@ -269,6 +361,7 @@ def load_ohlcv(symbol: str, as_of_date: str, fill_gaps: bool = True) -> pd.DataF
     # re-fetch rather than serving the poisoned file forever.
     data = None
     session = None
+    cached = None
     if os.path.exists(data_file):
         cached = pd.read_csv(data_file, on_bad_lines="skip", encoding="utf-8")
         session = load_session(data_file)
@@ -285,23 +378,26 @@ def load_ohlcv(symbol: str, as_of_date: str, fill_gaps: bool = True) -> pd.DataF
     if data is None:
         # yf.download catches every error, a rate limit included, and returns
         # an empty frame. Ticker.history raises the rate limit, so it is retried.
-        ticker = yf.Ticker(canonical)
-        downloaded = yf_retry(lambda: ticker.history(
-            start=start_str,
-            end=end_str,
-            auto_adjust=True,
-            actions=False,
-        ))
-        session = fetch_session(ticker)
-        if downloaded is None:
-            raise_for_empty(symbol, canonical, "price rows")
-        downloaded = _ensure_date_column(downloaded.reset_index())
-        # Only cache real data — never persist an empty frame.
-        if downloaded.empty or "Close" not in downloaded.columns:
-            raise_for_empty(symbol, canonical, "price rows")
-        replace_file(data_file, lambda temp: downloaded.to_csv(temp, index=False, encoding="utf-8"))
-        save_session(data_file, session)
-        data = downloaded
+        usable = cached if cached is not None and not cached.empty and "Close" in cached.columns else None
+        try:
+            ticker = yf.Ticker(canonical)
+            # The last weeks joined to the cached years; the whole range when that will not do.
+            downloaded = _incremental(ticker, usable, end_str) if usable is not None else None
+            if downloaded is None:
+                downloaded = _download(ticker, start_str, end_str)
+            session = fetch_session(ticker)
+            # Only cache real data — never persist an empty frame.
+            if downloaded is None:
+                raise_for_empty(symbol, canonical, "price rows")
+        except Exception as exc:
+            fallback = _offline(canonical, usable, now, exc)
+            if fallback is None:
+                raise
+            data = fallback
+        else:
+            replace_file(data_file, lambda temp: downloaded.to_csv(temp, index=False, encoding="utf-8"))
+            save_session(data_file, session)
+            data = downloaded
 
     data = _clean_dataframe(data)
 
