@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 PAST_DAY_SECONDS = 30 * 24 * 3600
 VERSION = 1                                   # bump when analyst prompts change materially
 
-ANALYST_NAMES = {"market": "市场分析师", "social": "情绪分析师", "news": "新闻分析师",
+ANALYST_NAMES = {"market": "市场分析师", "social": "舆情分析师", "news": "新闻分析师",
                  "fundamentals": "基本面分析师"}
 
 
@@ -110,4 +110,8 @@ def announce(analyst: str, written: float) -> None:
     name = ANALYST_NAMES.get(analyst, analyst)
     logger.info("reusing the %s report written %s", analyst, when)
     if os.environ.get("TRADINGAGENTS_PLAIN_PROGRESS"):
-        print(f"{datetime.now():%H:%M:%S} [复用] {name}：沿用 {when} 的报告，不再调用模型", flush=True)
+        import sys
+
+        # One write per line (see cli/progress.py): analysts finish at the same moment.
+        sys.stdout.write(f"{datetime.now():%H:%M:%S} [复用] {name}：沿用 {when} 的报告，不再调用模型\n")
+        sys.stdout.flush()

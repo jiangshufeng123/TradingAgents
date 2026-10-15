@@ -166,3 +166,38 @@ def test_the_sentiment_prompt_names_the_subreddits_searched(monkeypatch):
     text = _prompt_text(captured["prompt"])
     assert "r/Bitcoin, r/CryptoCurrency, r/CryptoMarkets" in text
     assert "wallstreetbets" not in text
+
+
+def test_a_text_answer_instead_of_the_schema_is_used_without_a_second_call(monkeypatch):
+    """DeepSeek's thinking models may not be forced to call the schema tool, and sometimes
+    answer in prose. That prose is the labelled text answer the prompt asks for, so it is
+    used as is: the deep model is not asked a second time."""
+    from langchain_core.messages import AIMessage
+    from langchain_core.outputs import ChatGeneration, ChatResult
+
+    from tradingagents.agents.managers.portfolio_manager import create_portfolio_manager
+    from tradingagents.llm_clients.openai_client import DeepSeekChatOpenAI
+
+    calls = []
+
+    def generate(self, messages, stop=None, run_manager=None, **kwargs):
+        calls.append(kwargs)
+        text = "**Rating**: Underweight\n\n**Executive Summary**: trim.\n\n**Investment Thesis**: weak demand."
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content=text))])
+
+    monkeypatch.setattr(DeepSeekChatOpenAI, "_generate", generate)
+    llm = DeepSeekChatOpenAI(model="deepseek-v4-pro", api_key="test", base_url="https://api.deepseek.com")
+    node = create_portfolio_manager(llm)
+    state = {
+        "company_of_interest": "603980.SS", "trade_date": "2026-10-15", "instrument_context": "",
+        "portfolio_context": "", "past_context": "", "learning_context": "",
+        "investment_plan": "plan", "trader_investment_plan": "proposal",
+        "risk_debate_state": {"history": "h", "aggressive_history": "", "conservative_history": "",
+                              "neutral_history": "", "latest_speaker": "", "current_aggressive_response": "",
+                              "current_conservative_response": "", "current_neutral_response": "", "count": 3},
+    }
+    out = node(state)
+    assert out["final_rating"] == "Underweight"
+    assert "weak demand" in out["final_trade_decision"]
+    assert len(calls) == 1                                  # one call, not a retry
+    assert "tool_choice" not in calls[0] or calls[0]["tool_choice"] is None

@@ -60,8 +60,10 @@ class PlainProgress(BaseCallbackHandler):
         self._print(f"[运行] {self.run_label.strip() or '开始分析'}")
 
     def _print(self, text: str) -> None:
-        line = f"{datetime.now():%H:%M:%S} {text}"
-        print(line, file=self.out, flush=True)
+        # One write per line: print() writes the text and the newline separately, so lines
+        # from analysts finishing at the same moment could run together.
+        self.out.write(f"{datetime.now():%H:%M:%S} {text}\n")
+        self.out.flush()
 
     @staticmethod
     def _node(kwargs: dict, serialized) -> str | None:
