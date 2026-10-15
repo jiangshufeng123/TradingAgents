@@ -20,13 +20,18 @@ class Base(DeclarativeBase):
     pass
 
 
+def home() -> Path:
+    """The service's own folder (database, job logs): TRADINGAGENTS_HOME or ~/.tradingagents."""
+    path = Path(os.environ.get("TRADINGAGENTS_HOME") or Path.home() / ".tradingagents").expanduser()
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def default_url() -> str:
     url = os.environ.get("TRADINGAGENTS_DATABASE_URL", "").strip()
     if url:
         return url
-    home = Path(os.environ.get("TRADINGAGENTS_HOME") or Path.home() / ".tradingagents").expanduser()
-    home.mkdir(parents=True, exist_ok=True)
-    return f"sqlite:///{(home / 'server.db').as_posix()}"
+    return f"sqlite:///{(home() / 'server.db').as_posix()}"
 
 
 _engines: dict = {}

@@ -85,10 +85,12 @@ def test_jobs_lifecycle_and_queue_order(url):
         job = jobs.next_queued(s)
         assert job.id == j1.id
         jobs.start(s, job, "/tmp/log")
-        assert jobs.cancel(s, job) is False                       # running: not cancellable
     with db.session(url) as s:
         assert jobs.next_queued(s).id == j2.id
         assert [j.status for j in jobs.active(s, u.id)] == ["running", "queued"]
+        running = s.get(type(j1), j1.id)
+        assert jobs.cancel(s, running) is True and running.status == "cancelling"   # the worker stops it
+        running.status = "running"
         job = s.get(type(j1), j1.id)
         jobs.finish(s, job, {"rating": "Hold"}, cost=2.5)
         jobs.cancel(s, s.get(type(j2), j2.id))

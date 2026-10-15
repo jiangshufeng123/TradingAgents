@@ -231,6 +231,9 @@ def daily(
         None, "--from-file",
         help="Also analyze the tickers in this file (one per line, or a CSV with a ticker column), "
              "e.g. the screens/latest.txt that `tradingagents screen` writes"),
+    portfolio: str = typer.Option(None, "--portfolio", help="Portfolio JSON for sizing; default TRADINGAGENTS_PORTFOLIO"),
+    no_portfolio: bool = typer.Option(False, "--no-portfolio", help="Size as weights of equity, ignoring "
+                                                                    "TRADINGAGENTS_PORTFOLIO"),
 ):
     """Analyze every ticker on the watchlist, unattended, and log each decision for the scoreboard."""
     from datetime import date as _date
@@ -261,7 +264,7 @@ def daily(
         # Candidates only: nothing joins the watchlist until you pick it
         # (tradingagents watchlist pick).
         _screen_picks(DEFAULT_CONFIG["daily_screen"], int(DEFAULT_CONFIG.get("daily_screen_top") or 20))
-    book = _portfolio(None)
+    book = None if no_portfolio else _portfolio(portfolio)
     if DEFAULT_CONFIG.get("paper_trading"):
         # Yesterday's orders fill at today's open before today's analyses size against the book.
         try:
@@ -567,7 +570,7 @@ def watchlist_pick(
     _pick_into_watchlist(result, note=f"screen {path.stem[7:]}", rows=add)
 
 
-server_app = typer.Typer(help="The system service: database, accounts, and (soon) the web API.")
+server_app = typer.Typer(help="The system service: database, accounts, and the web API.")
 app.add_typer(server_app, name="server")
 
 
@@ -615,6 +618,35 @@ def server_adduser(
         user = users.create_user(s, username, password, role="admin" if admin else "user")
         user.monthly_quota = quota
     console.print(f"[green]Created[/green] {username} ({'admin' if admin else 'user'})")
+
+
+@server_app.command("run")
+def server_run(
+    host: str = typer.Option("127.0.0.1", "--host", help="Address to listen on. 127.0.0.1: this computer only; "
+                                                        "0.0.0.0: every network (LAN / Tailscale)"),
+    port: int = typer.Option(8000, "--port"),
+    worker: bool = typer.Option(True, "--worker/--no-worker", help="Run queued jobs in this process"),
+    scheduler: bool = typer.Option(True, "--scheduler/--no-scheduler", help="Queue each user's daily analysis"),
+):
+    """Start the web service (API; interactive docs at /docs)."""
+    import uvicorn
+
+    from server import db
+    from server.app import create_app
+    from server.services import users
+
+    db.init_db()
+    with db.session() as s:
+        if not users.admins(s):
+            console.print("[red]No administrator yet: run `tradingagents server init --admin <name>` first.[/red]")
+            raise typer.Exit(code=1)
+    if host not in ("127.0.0.1", "localhost"):
+        console.print(f"[yellow]Listening on {host}: other devices on that network can reach the sign-in page. "
+                      "Use strong passwords; put HTTPS in front before exposing it to the internet.[/yellow]")
+    console.print(f"[green]TradingAgents service[/green] on http://{'127.0.0.1' if host == '0.0.0.0' else host}:{port} "
+                  f"(API docs at /docs); database {db.default_url()}")
+    uvicorn.run(create_app(DEFAULT_CONFIG, start_worker=worker, start_scheduler=scheduler),
+                host=host, port=port, log_level="info")
 
 
 @server_app.command("users")

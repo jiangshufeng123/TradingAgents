@@ -75,6 +75,7 @@ class Job(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     kind: Mapped[str] = mapped_column(String(16))                           # analysis | daily | screen
     params: Mapped[dict] = mapped_column(JSON, default=dict)
+    # queued -> running -> done | failed | cancelled; "cancelling" while a running job is stopped
     status: Mapped[str] = mapped_column(String(16), default="queued", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -111,3 +112,14 @@ class Schedule(Base):
     time_of_day: Mapped[str] = mapped_column(String(5), default="18:30")
     days: Mapped[str] = mapped_column(String(32), default="mon-fri")
     runs: Mapped[int] = mapped_column(Integer, default=2)
+
+
+class AuthSession(Base):
+    """A signed-in browser or device. Only a hash of the token is stored."""
+    __tablename__ = "auth_sessions"
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    last_seen: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    user_agent: Mapped[str] = mapped_column(String(200), default="")
