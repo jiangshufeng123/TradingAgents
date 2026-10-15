@@ -37,6 +37,13 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_ANALYSTS":             "default_analysts",
     # Tickers for `tradingagents daily`, comma-separated.
     "TRADINGAGENTS_WATCHLIST":            "watchlist",
+    "TRADINGAGENTS_PORTFOLIO":            "portfolio_path",
+    "TRADINGAGENTS_RISK_CONTEXT":         "risk_context",
+    "TRADINGAGENTS_RISK_PER_TRADE":       "risk_per_trade",
+    "TRADINGAGENTS_ATR_STOP_MULT":        "atr_stop_mult",
+    "TRADINGAGENTS_MAX_POSITION_WEIGHT":  "max_position_weight",
+    "TRADINGAGENTS_MAX_PORTFOLIO_VAR":    "max_portfolio_var",
+    "TRADINGAGENTS_LOT_SIZES":            "lot_sizes",
     "TRADINGAGENTS_MODEL_PRICES":         "model_prices",
     "TRADINGAGENTS_PRICE_CURRENCY":       "price_currency",
     # Data volume fed to the analysts (fewer articles, fewer input tokens).
@@ -177,6 +184,18 @@ def build_default_config() -> dict:
         "default_analysts": None,
         # Tickers `tradingagents daily` analyzes, e.g. "NVDA,600519.SS,0700.HK".
         "watchlist": None,
+        # Position sizing and risk, computed in code (tradingagents/risk.py).
+        # portfolio_path: JSON with cash and positions (see portfolio.example.json),
+        # used by analyze and daily when --portfolio is not given.
+        "portfolio_path": None,
+        # Give the Trader, risk analysts and Portfolio Manager the measured
+        # ATR/volatility/book-risk figures before they decide.
+        "risk_context": True,
+        "risk_per_trade": 0.01,          # equity fraction lost if the stop is hit
+        "atr_stop_mult": 2.0,            # stop distance in ATRs
+        "max_position_weight": 0.2,      # cap on one position's share of equity
+        "max_portfolio_var": 0.03,       # 1-day 95% VaR limit, fraction of equity
+        "lot_sizes": None,               # e.g. "6616.HK=500,0700.HK=100"
         # Checkpoint/resume: when True, LangGraph saves state after each node
         # so a crashed run can resume from the last successful step.
         "checkpoint_enabled": False,

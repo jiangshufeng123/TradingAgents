@@ -286,7 +286,7 @@ class TradingAgentsGraph:
         }
 
     def save_reports(self, final_state, ticker, save_path=None, html=True, usage_markdown=None,
-                     vote_markdown=None) -> Path:
+                     vote_markdown=None, sizing_markdown=None) -> Path:
         """Write the report tree for a completed run, like the CLI does.
 
         Programmatic callers get the same on-disk reports the CLI produces. Pass
@@ -296,7 +296,8 @@ class TradingAgentsGraph:
         if save_path is None:
             save_path = self.default_report_path(ticker, final_state.get("trade_date"))
         return write_report_tree(final_state, ticker, save_path, settings=self.run_settings(), html=html,
-                                 usage_markdown=usage_markdown, vote_markdown=vote_markdown)
+                                 usage_markdown=usage_markdown, vote_markdown=vote_markdown,
+                                 sizing_markdown=sizing_markdown)
 
     def reports_base_dir(self) -> Path:
         """The folder every run's report subfolder goes under.
@@ -330,7 +331,21 @@ class TradingAgentsGraph:
             asset_type=asset_type,
             instrument_context=self.resolve_instrument_context(company_name, asset_type, trade_date),
             portfolio_context=portfolio.render(company_name) if portfolio is not None else "",
+            risk_context=self.risk_context(company_name, trade_date, asset_type, portfolio),
         )
+
+    def risk_context(self, company_name, trade_date, asset_type: str = "stock", portfolio=None) -> str:
+        """Measured risk figures for the decision agents (tradingagents/risk.py); '' when off or unavailable."""
+        if not self.config.get("risk_context", True):
+            return ""
+        from tradingagents import risk
+
+        try:
+            with run_config(self.config):
+                return risk.context_block(company_name, str(trade_date), portfolio, self.config)
+        except Exception as exc:   # risk figures are an aid; a run never fails on them
+            logger.info("No risk context for %s: %s", company_name, exc)
+            return ""
 
     def _memory_step(self, state):
         """The graph's Memory Log step, alongside the analysts (#1428): settle every

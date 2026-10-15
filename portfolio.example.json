@@ -1,0 +1,9 @@
+{
+  "currency": "CNY",
+  "cash": 200000,
+  "positions": [
+    {"ticker": "NVDA", "quantity": 50, "average_price": 120.0},
+    {"ticker": "603980.SS", "quantity": 2000, "average_price": 18.5},
+    {"ticker": "6616.HK", "quantity": 1000}
+  ]
+}

@@ -224,3 +224,6 @@ reports/
 
 # tradingagents daily logs
 logs/
+
+# Your own holdings (copy portfolio.example.json)
+portfolio.json

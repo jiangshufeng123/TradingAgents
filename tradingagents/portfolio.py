@@ -32,7 +32,17 @@ class PortfolioContext(BaseModel):
     positions: list[Position] = Field(default_factory=list)
 
     def position_in(self, ticker: str) -> Position | None:
-        return next((p for p in self.positions if p.ticker.upper() == ticker.strip().upper()), None)
+        """The position in ``ticker``, matching spellings of one listing (600519.SH is 600519.SS)."""
+        from tradingagents.dataflows.symbols import normalize_symbol
+
+        def key(symbol):
+            try:
+                return normalize_symbol(symbol.strip()).upper()
+            except Exception:
+                return symbol.strip().upper()
+
+        target = key(ticker)
+        return next((p for p in self.positions if key(p.ticker) == target), None)
 
     def render(self, ticker: str) -> str:
         """The portfolio block for the decision agents, led by the analyzed instrument."""

@@ -218,10 +218,13 @@ def get_portfolio_context_from_state(state: Mapping[str, Any]) -> str:
     an account we were never told about.
     """
     context = state.get("portfolio_context")
-    if isinstance(context, str) and context.strip():
-        return context
-    return (
-        "Portfolio context: not provided. You do not know the caller's current "
-        "holdings or cash, so do not assume a flat book; give direction and "
-        "sizing guidance in terms the caller can apply to their own position."
-    )
+    if not (isinstance(context, str) and context.strip()):
+        context = (
+            "Portfolio context: not provided. You do not know the caller's current "
+            "holdings or cash, so do not assume a flat book; give direction and "
+            "sizing guidance in terms the caller can apply to their own position."
+        )
+    risk = state.get("risk_context")
+    if isinstance(risk, str) and risk.strip():
+        return f"{context}\n\n{risk}"
+    return context

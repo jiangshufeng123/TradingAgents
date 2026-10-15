@@ -34,6 +34,7 @@ LEDGER_FIELDS = (
     "quick_input_tokens", "quick_output_tokens", "deep_input_tokens", "deep_output_tokens",
     "cost", "currency", "elapsed_seconds", "report_dir",
     "vote_runs", "vote_ratings", "agreement",
+    "action", "target_weight", "stop",
 )
 
 
@@ -271,7 +272,8 @@ def _upgrade_header(path: Path) -> None:
 
 
 def ledger_row(summary: dict, *, run_time: str, ticker: str, trade_date: str, rating: str,
-               analysts, config: dict, elapsed_seconds: float, report_dir, vote: dict | None = None) -> dict:
+               analysts, config: dict, elapsed_seconds: float, report_dir, vote: dict | None = None,
+               sizing=None) -> dict:
     total, tiers = summary["total"], summary["tiers"]
     quick, deep = tiers.get("quick", {}), tiers.get("deep", {})
     cost = summary["cost"]
@@ -288,4 +290,7 @@ def ledger_row(summary: dict, *, run_time: str, ticker: str, trade_date: str, ra
         "vote_runs": vote["runs"] if vote else 1,
         "vote_ratings": " ".join(vote["ratings"]) if vote else rating,
         "agreement": round(vote["agreement"], 2) if vote else 1,
+        "action": sizing.action if sizing else "",
+        "target_weight": "" if sizing is None or sizing.target_weight is None else round(sizing.target_weight, 4),
+        "stop": round(sizing.stop, 4) if sizing else "",
     }

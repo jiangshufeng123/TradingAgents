@@ -10,6 +10,7 @@ from cli.selections import unattended_gaps
 from tradingagents.backtest import iter_grid, run_backtest, summarize
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.portfolio import load_portfolio
+from tradingagents.risk import summary_line as sizing_summary
 
 # prompt_toolkit's win32 output module is importable only on Windows (it asserts
 # the platform at import time), so gate on the platform rather than catching the
@@ -48,7 +49,7 @@ def analyze(
         None,
         "--portfolio",
         help="JSON file with current holdings and cash, so the trader, risk and "
-        "portfolio agents size against your actual position.",
+        "portfolio agents size against your actual position (default: TRADINGAGENTS_PORTFOLIO).",
     ),
     ticker: str = typer.Option(None, "--ticker", help="Ticker to analyze, e.g. NVDA or 0700.HK; skips the prompt"),
     date: str = typer.Option(None, "--date", help="Analysis date, YYYY-MM-DD; skips the prompt"),
@@ -81,13 +82,7 @@ def analyze(
         from tradingagents.graph.checkpointer import clear_all_checkpoints
         n = clear_all_checkpoints(DEFAULT_CONFIG["data_cache_dir"])
         console.print(f"[yellow]Cleared {n} checkpoint(s).[/yellow]")
-    portfolio_context = None
-    if portfolio:
-        try:
-            portfolio_context = load_portfolio(portfolio)
-        except ValueError as exc:
-            console.print(f"[red]{exc}[/red]")
-            raise typer.Exit(code=1) from None
+    portfolio_context = _portfolio(portfolio)
 
     try:
         flags = {"ticker": ticker, "date": date, "analysts": analysts, "save": save, "show": show, "html": html,
@@ -165,6 +160,18 @@ def backtest(
 ALL_ANALYSTS = "market,sentiment,news,fundamentals"
 
 
+def _portfolio(path):
+    """The book from --portfolio, else TRADINGAGENTS_PORTFOLIO; None when neither is set."""
+    path = path or DEFAULT_CONFIG.get("portfolio_path")
+    if not path:
+        return None
+    try:
+        return load_portfolio(path)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+
+
 def _watchlist(tickers: str | None) -> list[str]:
     text = tickers or DEFAULT_CONFIG.get("watchlist") or ""
     return list(dict.fromkeys(t.strip().upper() for t in str(text).replace(";", ",").split(",") if t.strip()))
@@ -196,17 +203,27 @@ def daily(
             console.print(f"  {gap}")
         raise typer.Exit(code=1)
 
-    done, failed = [], []
+    book = _portfolio(None)
+    done, failed, results = [], [], []
     for index, ticker in enumerate(names, 1):
         console.rule(f"[bold cyan]{index}/{len(names)} {ticker} {base['date']}")
         try:
-            run_analysis(portfolio=None, flags={**base, "ticker": ticker})
+            results.append(run_analysis(portfolio=book, flags={**base, "ticker": ticker}) or {})
             done.append(ticker)
         except (Exception, typer.Exit) as exc:   # one ticker must not end the watchlist
             failed.append((ticker, f"{type(exc).__name__}: {exc}"))
             console.print(f"[yellow]{ticker} failed: {exc}[/yellow]")
     console.rule("[bold]Daily run finished")
     console.print(f"Analyzed {len(done)}/{len(names)}: {', '.join(done) or '-'}")
+    for result in results:
+        sizing = result.get("sizing")
+        if sizing is not None:
+            console.print(f"  {sizing_summary(sizing)}")
+        elif result.get("ticker"):
+            console.print(f"  {result['ticker']}: {result.get('rating') or 'REVIEW'}")
+    if book is None:
+        console.print("[dim]No portfolio set (TRADINGAGENTS_PORTFOLIO): sizes are weights of equity, "
+                      "not share counts.[/dim]")
     for ticker, reason in failed:
         console.print(f"[yellow]failed:[/yellow] {ticker}: {reason}")
     console.print("Decisions are in the memory log; run [bold]tradingagents scoreboard[/bold] once they have settled.")
@@ -241,6 +258,44 @@ def scoreboard(
     base = Path(config.get("reports_dir") or Path(config["results_dir"]) / "reports").expanduser()
     md, csv_path = sb.write(board, base, _date.today().isoformat())
     console.print(f"\n[dim]Saved:[/dim] {md}\n[dim]       [/dim] {csv_path}")
+
+
+@app.command()
+def risk(
+    tickers: str = typer.Argument(
+        None, help="Comma-separated tickers; omit to use TRADINGAGENTS_WATCHLIST from .env"),
+    rating: str = typer.Option("Buy", "--rating", help="Rating to size for: Buy/Overweight/Hold/Underweight/Sell"),
+    date: str = typer.Option(None, "--date", help="As-of date, YYYY-MM-DD (default: today)"),
+    portfolio: str = typer.Option(None, "--portfolio", help="Holdings JSON (default: TRADINGAGENTS_PORTFOLIO)"),
+):
+    """Risk figures and position size for tickers, computed in code; no model is called."""
+    from datetime import date as _date
+
+    from tradingagents import risk as rk
+    from tradingagents.dataflows.config import run_config
+
+    names = _watchlist(tickers)
+    if not names:
+        console.print("[red]No tickers: pass them or set TRADINGAGENTS_WATCHLIST in .env[/red]")
+        raise typer.Exit(code=1)
+    book = _portfolio(portfolio)
+    as_of = date or _date.today().isoformat()
+    rating = rating.strip().capitalize()
+    with run_config(DEFAULT_CONFIG):
+        for ticker in names:
+            console.rule(f"[bold cyan]{ticker} {as_of}")
+            block = rk.context_block(ticker, as_of, book, DEFAULT_CONFIG)
+            console.print(block or "[yellow]No price history: risk figures unavailable.[/yellow]")
+            if not block:
+                continue
+            try:
+                sizing = rk.size_position(ticker, rating, as_of, book, DEFAULT_CONFIG)
+            except Exception as exc:
+                console.print(f"[yellow]Could not size {ticker}: {exc}[/yellow]")
+                continue
+            console.print(f"\n[bold]If the rating were {rating}:[/bold] {rk.summary_line(sizing)}")
+            for warning in sizing.warnings:
+                console.print(f"  [yellow]•[/yellow] {warning}")
 
 
 if __name__ == "__main__":

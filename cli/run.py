@@ -31,6 +31,10 @@ from tradingagents.graph.analyst_execution import (
     build_analyst_execution_plan,
 )
 from tradingagents.graph.trading_graph import TradingAgentsGraph
+from tradingagents.dataflows.config import run_config
+from tradingagents.risk import render_markdown as render_sizing
+from tradingagents.risk import size_position
+from tradingagents.risk import summary_line as sizing_summary
 from tradingagents.usage import append_ledger, ledger_row, render_markdown, summarize
 from tradingagents.vote import agreement_label, consensus
 from tradingagents.vote import render_markdown as render_vote
@@ -438,6 +442,9 @@ def run_analysis(checkpoint: bool | None = None, portfolio=None, flags=None):
         else:
             graph.record_decision(selections["ticker"], selections["analysis_date"], final_state)
 
+    rating = (vote or {}).get("rating") or run_rating(final_state)
+    sizing = _compute_sizing(graph, selections, rating, portfolio)
+
     usage = summarize(stats_handler.usage, config)
     _print_usage(usage)
     # The run's own duration: the questions below can wait on the user for hours.
@@ -448,10 +455,29 @@ def run_analysis(checkpoint: bool | None = None, portfolio=None, flags=None):
                               open_page=flags.get("open"),
                               trade_date=selections.get("analysis_date"),
                               usage_markdown=render_markdown(usage),
-                              vote_markdown=render_vote(vote) if vote else None)
+                              vote_markdown=render_vote(vote) if vote else None,
+                              sizing_markdown=render_sizing(sizing) if sizing else None)
     if saved_to and vote:
         _save_run_reports(graph, run_states, selections["ticker"], saved_to)
-    _record_cost(usage, graph, config, selections, final_state, saved_to, elapsed, vote)
+    _record_cost(usage, graph, config, selections, final_state, saved_to, elapsed, vote, sizing)
+    return {"ticker": selections["ticker"], "rating": rating, "sizing": sizing, "report_dir": saved_to}
+
+
+def _compute_sizing(graph, selections, rating, portfolio):
+    """The final rating as a position (tradingagents/risk.py); None when it cannot be computed."""
+    if not rating or is_review(rating):
+        return None
+    try:
+        with run_config(graph.config):
+            sizing = size_position(selections["ticker"], rating, selections["analysis_date"],
+                                   portfolio, graph.config)
+    except Exception as e:   # sizing is an aid; it never costs the user the run
+        console.print(f"[yellow]Could not compute the position size: {e}[/yellow]")
+        return None
+    console.print(f"\n[bold]Position sizing:[/bold] {sizing_summary(sizing)}")
+    for warning in sizing.warnings:
+        console.print(f"  [yellow]•[/yellow] {warning}")
+    return sizing
 
 
 def _vote_runs(flags: dict, config: dict) -> int:
@@ -529,7 +555,8 @@ def _print_usage(usage: dict) -> None:
         console.print("[dim]Set TRADINGAGENTS_MODEL_PRICES in .env to see costs.[/dim]")
 
 
-def _record_cost(usage, graph, config, selections, final_state, saved_to, elapsed, vote=None) -> None:
+def _record_cost(usage, graph, config, selections, final_state, saved_to, elapsed, vote=None,
+                 sizing=None) -> None:
     """Append this run to the cost ledger next to the reports; a failure only warns."""
     from datetime import datetime
 
@@ -546,6 +573,7 @@ def _record_cost(usage, graph, config, selections, final_state, saved_to, elapse
             ticker=selections["ticker"],
             trade_date=selections.get("analysis_date", ""),
             rating=(vote or {}).get("rating") or run_rating(final_state),
+            sizing=sizing,
             analysts=[getattr(a, "value", a) for a in selections.get("analysts", [])],
             config=config,
             elapsed_seconds=elapsed,
@@ -593,7 +621,7 @@ def _open_page(page: Path, ask: bool = True) -> None:
 
 
 def _offer_reports(final_state, graph, ticker, save=None, show=None, html=None, trade_date=None,
-                   usage_markdown=None, vote_markdown=None, open_page=None):
+                   usage_markdown=None, vote_markdown=None, open_page=None, sizing_markdown=None):
     """Save the report tree and show it; ``save``/``show``/``html`` answer the questions when given.
 
     Returns the folder the report was saved in, or None when it was not saved.
@@ -626,7 +654,8 @@ def _offer_reports(final_state, graph, ticker, save=None, show=None, html=None, 
         saved = False
         try:
             report_file = graph.save_reports(final_state, ticker, save_path, html=html,
-                                             usage_markdown=usage_markdown, vote_markdown=vote_markdown)
+                                             usage_markdown=usage_markdown, vote_markdown=vote_markdown,
+                                             sizing_markdown=sizing_markdown)
             saved = True
             saved_to = save_path
             console.print(f"\n[green]✓ Report saved to:[/green] {save_path.resolve()}")

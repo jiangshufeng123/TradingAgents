@@ -681,3 +681,58 @@ def daily_bars(ticker: str, start: pd.Timestamp, end: pd.Timestamp) -> tuple[pd.
         if not bars.empty:
             return bars.reset_index(drop=True), source
     return pd.DataFrame(), ""
+
+
+# --- Hong Kong board lots ------------------------------------------------------
+
+HKEX_SECURITIES_LIST = (
+    "https://www.hkex.com.hk/eng/services/trading/securities/securitieslists/ListOfSecurities.xlsx"
+)
+
+
+def _hkex_board_lots() -> dict[str, int]:
+    """Every listing's board lot from HKEX's own list of securities (one download)."""
+    import io
+
+    import requests
+
+    resp = requests.get(HKEX_SECURITIES_LIST, timeout=CALL_TIMEOUT_SECONDS,
+                        headers={"User-Agent": "Mozilla/5.0"})
+    resp.raise_for_status()
+    raw = pd.read_excel(io.BytesIO(resp.content), header=None, dtype=str)
+    header_row = next(i for i, row in raw.iterrows()
+                      if any(str(v).strip() == "Board Lot" for v in row.values))
+    table = raw.iloc[header_row + 1:]
+    table.columns = [str(c).strip() for c in raw.iloc[header_row]]
+    lots = {}
+    for code, lot in zip(table["Stock Code"], table["Board Lot"]):
+        try:
+            lots[str(int(str(code).strip())).zfill(5)] = int(float(str(lot).replace(",", "")))
+        except ValueError:
+            continue
+    return lots
+
+
+def hk_board_lot(ticker: str) -> tuple[int, str] | None:
+    """(shares per board lot, source) for a Hong Kong listing, or None when no source answers.
+
+    East Money's security profile first, then HKEX's list of securities.
+    """
+    market, code = _require(ticker)
+    if market != "hk":
+        return None
+    try:
+        df = call("stock_hk_security_profile_em", symbol=code)
+        if not df.empty and "每手股数" in df.columns:
+            lot = int(float(df["每手股数"].iloc[0]))
+            if lot > 0:
+                return lot, "East Money"
+    except Exception as exc:
+        logger.debug("%s board lot from East Money failed: %s", ticker, exc)
+    try:
+        lot = _hkex_board_lots().get(code)
+        if lot:
+            return lot, "HKEX"
+    except Exception as exc:
+        logger.debug("HKEX securities list failed: %s", exc)
+    return None
