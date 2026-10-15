@@ -736,3 +736,171 @@ def hk_board_lot(ticker: str) -> tuple[int, str] | None:
     except Exception as exc:
         logger.debug("HKEX securities list failed: %s", exc)
     return None
+
+
+# --- A-share trading microstructure ---------------------------------------------
+# 龙虎榜 (exchange-published top traders on unusual days), 融资融券 (margin
+# balances), 人气榜 (East Money popularity rank) and limit-up/limit-down days.
+# Every figure is cut at the analysis date: a list or balance published after it
+# is never shown, and the 龙虎榜 table's "after listing" returns are dropped.
+
+def _a_share(ticker: str) -> tuple[str, str] | None:
+    found = market_of(ticker)
+    return found if found and found[0] in ("sh", "sz") else None
+
+
+def _sessions(ticker: str, end_date: str) -> list[pd.Timestamp]:
+    """The listing's trading days up to ``end_date``, from its own price history."""
+    from tradingagents.dataflows.vendors.yahoo.ohlcv import load_ohlcv
+
+    data = load_ohlcv(ticker, end_date)
+    return [pd.Timestamp(d).normalize() for d in data["Date"]]
+
+
+def limit_move_lines(ticker: str, end_date: str, sessions: int = 20) -> list[str]:
+    """Limit-up / limit-down closes over the last ``sessions`` days, from prices."""
+    from tradingagents.dataflows.vendors.yahoo.ohlcv import load_ohlcv
+    from tradingagents.risk import a_share_board
+
+    board = a_share_board(ticker)
+    if board is None:
+        return []
+    data = load_ohlcv(ticker, end_date).tail(sessions + 1)
+    change = data["Close"].astype(float).pct_change().dropna()
+    edge = board[1] - 0.003            # a limit close rounds to the cent
+    ups = change[change >= edge]
+    downs = change[change <= -edge]
+    streak, sign = 0, 0
+    for value in reversed(change.tolist()):
+        s = 1 if value >= edge else -1 if value <= -edge else 0
+        if s == 0 or (sign and s != sign):
+            break
+        sign, streak = s, streak + 1
+    dates = data["Date"].iloc[1:].reset_index(drop=True)
+
+    def when(moves):
+        return f" ({', '.join(f'{pd.Timestamp(dates[i]):%m-%d}' for i in moves.index)})" if len(moves) else ""
+
+    change = change.reset_index(drop=True)
+    ups = change[change >= edge]
+    downs = change[change <= -edge]
+    lines = [f"## Limit moves ({board[0]}, ±{board[1]:.0%}; last {len(change)} sessions)",
+             f"- Limit-up closes: {len(ups)}{when(ups)}; limit-down closes: {len(downs)}{when(downs)}"]
+    if streak:
+        lines.append(f"- Current streak: {streak} consecutive limit-{'up' if sign > 0 else 'down'} close(s)")
+    return lines
+
+
+def lhb_lines(ticker: str, end_date: str, sessions: int = 20) -> list[str]:
+    """龙虎榜 appearances over the last ``sessions`` trading days to ``end_date``
+    (the same span as the limit-move count, which a holiday can stretch)."""
+    found = _a_share(ticker)
+    if found is None:
+        return []
+    end = pd.Timestamp(end_date)
+    try:
+        days = [d for d in _sessions(ticker, end_date) if d <= end]
+        start = days[-sessions] if len(days) >= sessions else end - timedelta(days=45)
+    except Exception:
+        start = end - timedelta(days=45)
+    df = call("stock_lhb_detail_em", start_date=f"{start:%Y%m%d}", end_date=f"{end:%Y%m%d}")
+    header = f"## 龙虎榜 (Dragon-Tiger list) from {start:%Y-%m-%d} to {end:%Y-%m-%d}"
+    if df.empty or "代码" not in df.columns:
+        return [header, "- not listed"]
+    df = df[df["代码"].astype(str).str.zfill(6) == found[1]].copy()
+    df["_d"] = pd.to_datetime(df["上榜日"], errors="coerce")
+    df = df[df["_d"] <= end].sort_values("_d")
+    if df.empty:
+        return [header, "- not listed"]
+    rows = [[f"{r['_d']:%Y-%m-%d}", str(r.get("上榜原因") or "")[:40], _fmt(r.get("涨跌幅")),
+             _yi(r.get("龙虎榜净买额")), _fmt(r.get("净买额占总成交比")), _fmt(r.get("换手率"))]
+            for _, r in df.iterrows()]
+    net = pd.to_numeric(df["龙虎榜净买额"], errors="coerce").sum()
+    return [header,
+            _table(["Date", "Reason", "Chg %", "Net buy (亿)", "Net % of turnover", "Turnover %"], rows),
+            f"Net buying by listed seats over the window: {_yi(net)} 亿元 across {len(df)} listing(s)."]
+
+
+def _margin_row(market: str, code: str, day: pd.Timestamp) -> dict | None:
+    if market == "sh":
+        df = call("stock_margin_detail_sse", date=f"{day:%Y%m%d}")
+        key, buy, bal, short = "标的证券代码", "融资买入额", "融资余额", "融券余量"
+    else:
+        df = call("stock_margin_detail_szse", date=f"{day:%Y%m%d}")
+        key, buy, bal, short = "证券代码", "融资买入额", "融资余额", "融券余量"
+    if df.empty or key not in df.columns:
+        return None
+    row = df[df[key].astype(str).str.zfill(6) == code]
+    if row.empty:
+        return None
+    row = row.iloc[0]
+    return {"date": day, "balance": _num(row.get(bal)), "buy": _num(row.get(buy)), "short": _num(row.get(short))}
+
+
+def margin_lines(ticker: str, end_date: str, lookback: int = 5) -> list[str]:
+    """Margin financing for the listing: the latest published day before ``end_date``
+    (exchanges publish day T on T+1) against ``lookback`` sessions earlier."""
+    found = _a_share(ticker)
+    if found is None:
+        return []
+    market, code = found
+    days = [d for d in _sessions(ticker, end_date) if d < pd.Timestamp(end_date).normalize()]
+    if len(days) <= lookback:
+        return []
+    latest = _margin_row(market, code, days[-1])
+    header = "## 融资融券 (margin trading)"
+    if latest is None:
+        return [header, f"- {ticker} is not a margin-trading underlying, or no data for {days[-1]:%Y-%m-%d}"]
+    earlier = _margin_row(market, code, days[-1 - lookback])
+    line = f"- {latest['date']:%Y-%m-%d}: financing balance {_yi(latest['balance'])} 亿元"
+    if earlier and earlier["balance"] and latest["balance"] is not None:
+        change = latest["balance"] / earlier["balance"] - 1
+        line += f" ({change:+.1%} over {lookback} sessions, from {_yi(earlier['balance'])} 亿)"
+    lines = [header, line]
+    if latest["buy"] is not None:
+        lines.append(f"- Financing bought that day: {_yi(latest['buy'])} 亿元; "
+                     f"shares lent short outstanding: {_fmt(latest['short'], 0)}")
+    return lines
+
+
+def hot_rank_lines(ticker: str, end_date: str, sessions: int = 10) -> list[str]:
+    """East Money popularity rank (股吧 / app attention) for the last ``sessions`` days."""
+    found = _a_share(ticker)
+    if found is None:
+        return []
+    market, code = found
+    df = call("stock_hot_rank_detail_em", symbol=f"{market.upper()}{code}")
+    if df.empty or "排名" not in df.columns:
+        return []
+    df = df.assign(_d=pd.to_datetime(df["时间"], errors="coerce")).dropna(subset=["_d"])
+    df = df[df["_d"] <= pd.Timestamp(end_date)].sort_values("_d").tail(sessions)
+    if df.empty:
+        return []
+    ranks = pd.to_numeric(df["排名"], errors="coerce")
+    first, last = ranks.iloc[0], ranks.iloc[-1]
+    trend = "rising attention" if last < first else "fading attention" if last > first else "steady"
+    lines = ["## 人气榜 (East Money popularity rank; 1 = most watched A-share)",
+             f"- Latest rank {last:,.0f} on {df['_d'].iloc[-1]:%Y-%m-%d}; {first:,.0f} on "
+             f"{df['_d'].iloc[0]:%Y-%m-%d} ({trend}); best in window {ranks.min():,.0f}"]
+    if "新晋粉丝" in df.columns:
+        lines.append(f"- Followers: new {_fmt(df['新晋粉丝'].iloc[-1] * 100, 0)}% / "
+                     f"long-standing {_fmt(df['铁杆粉丝'].iloc[-1] * 100, 0)}%")
+    return lines
+
+
+def a_share_microstructure(ticker: str, end_date: str) -> str:
+    """Limit moves, 龙虎榜, margin and popularity for an A-share; '' for other listings.
+
+    Each part fails on its own: a source that does not answer is marked
+    unavailable and the rest still report.
+    """
+    if _a_share(ticker) is None:
+        return ""
+    parts = []
+    for name, func in (("Limit moves", limit_move_lines), ("龙虎榜", lhb_lines),
+                       ("融资融券", margin_lines), ("人气榜", hot_rank_lines)):
+        try:
+            parts.append("\n".join(func(ticker, end_date)))
+        except Exception as exc:
+            parts.append(f"## {name}\n- <unavailable: {type(exc).__name__}>")
+    return "\n\n".join(p for p in parts if p.strip())

@@ -71,4 +71,6 @@ class AgentState(MessagesState):
     past_context: Annotated[str, "Memory log context for the Portfolio Manager (same-ticker decisions + cross-ticker lessons), written by the Memory Log step"]
     memory_note: Annotated[str, "What the Memory Log step could not settle or read this run, for the report; empty when all went well"]
     portfolio_context: Annotated[str, "Caller-supplied holdings and cash, rendered at run start; empty when not provided"]
+    style_views: Annotated[str, "The style panel's views (value, growth, momentum, policy) on the analysts' reports"]
+    learning_context: Annotated[str, "The system's own track record and learned beliefs, for the Research Manager and Portfolio Manager; written by the Memory Log step"]
     risk_context: Annotated[str, "Risk figures computed in code at run start (ATR, volatility, book risk); empty when unavailable"]

@@ -6,6 +6,7 @@ from langchain_core.messages import HumanMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
+from tradingagents.agents.researchers.style_panel import create_style_panel
 from tradingagents.agents import (
     create_aggressive_debator,
     create_bear_researcher,
@@ -107,7 +108,8 @@ class GraphSetup:
         self.max_tool_rounds = max_tool_rounds
 
     def setup_graph(
-        self, selected_analysts=("market", "social", "news", "fundamentals"), memory_node=None
+        self, selected_analysts=("market", "social", "news", "fundamentals"), memory_node=None,
+        research_styles=None,
     ):
         """Set up and compile the agent workflow graph.
 
@@ -166,11 +168,20 @@ class GraphSetup:
         workflow.add_edge(first_steps, "Bull Researcher")
 
         # Both research-debate edges share the complete DEBATE_PATH_MAP (#1088).
+        # The style panel (value/growth/momentum/policy views) sits between the
+        # debate and the Research Manager unless research_styles turns it off.
+        panel_on = str(research_styles).strip().lower() not in ("", "off", "none", "false", "0") \
+            if research_styles is not None else True
+        debate_map = dict(DEBATE_PATH_MAP)
+        if panel_on:
+            workflow.add_node("Style Panel", create_style_panel(self.quick_thinking_llm, research_styles))
+            debate_map["Research Manager"] = "Style Panel"
+            workflow.add_edge("Style Panel", "Research Manager")
         for debate_node in ("Bull Researcher", "Bear Researcher"):
             workflow.add_conditional_edges(
                 debate_node,
                 self.conditional_logic.should_continue_debate,
-                DEBATE_PATH_MAP,
+                debate_map,
             )
         workflow.add_edge("Research Manager", "Trader")
         workflow.add_edge("Trader", "Aggressive Analyst")

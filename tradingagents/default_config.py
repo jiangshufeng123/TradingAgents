@@ -44,6 +44,9 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_MAX_POSITION_WEIGHT":  "max_position_weight",
     "TRADINGAGENTS_MAX_PORTFOLIO_VAR":    "max_portfolio_var",
     "TRADINGAGENTS_LOT_SIZES":            "lot_sizes",
+    "TRADINGAGENTS_LEARN_BELIEFS":        "learn_beliefs",
+    "TRADINGAGENTS_RESEARCH_STYLES":      "research_styles",
+    "TRADINGAGENTS_BELIEF_UPDATE_EVERY":  "belief_update_every",
     "TRADINGAGENTS_MODEL_PRICES":         "model_prices",
     "TRADINGAGENTS_PRICE_CURRENCY":       "price_currency",
     # Data volume fed to the analysts (fewer articles, fewer input tokens).
@@ -196,6 +199,16 @@ def build_default_config() -> dict:
         "max_position_weight": 0.2,      # cap on one position's share of equity
         "max_portfolio_var": 0.03,       # 1-day 95% VaR limit, fraction of equity
         "lot_sizes": None,               # e.g. "6616.HK=500,0700.HK=100"
+        # Learning from settled decisions (tradingagents/memory/learning.py):
+        # the track record always reaches the Research and Portfolio Managers;
+        # learn_beliefs also revises a short list of rules (one deep-model call)
+        # every belief_update_every newly settled decisions.
+        "learn_beliefs": True,
+        # Style panel after the bull/bear debate: None runs value, growth and
+        # momentum (plus policy for A-share/HK listings); a comma list picks
+        # styles; "off" removes the panel. Each style is one quick-model call.
+        "research_styles": None,
+        "belief_update_every": 5,
         # Checkpoint/resume: when True, LangGraph saves state after each node
         # so a crashed run can resume from the last successful step.
         "checkpoint_enabled": False,

@@ -38,6 +38,9 @@ def create_portfolio_manager(llm):
             if past_context
             else ""
         )
+        learning_context = state.get("learning_context", "")
+        if learning_context:
+            lessons_line += f"- {learning_context}\n"
 
         prompt = f"""As the Portfolio Manager, synthesize the risk analysts' debate and deliver the final trading decision.
 

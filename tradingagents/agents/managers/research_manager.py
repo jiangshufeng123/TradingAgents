@@ -19,6 +19,14 @@ def create_research_manager(llm):
         history = state["investment_debate_state"].get("history", "")
 
         investment_debate_state = state["investment_debate_state"]
+        learning_context = state.get("learning_context", "")
+        learning_section = f"\n**What your past calls teach:**\n{learning_context}\n\n---\n" if learning_context else ""
+        style_views = state.get("style_views", "")
+        if style_views:
+            learning_section += (
+                "\n**Style panel** (the same reports read by investors with different beliefs; a call "
+                "the styles share is stronger than one only a single style would make, and a style "
+                "that disagrees names the risk to watch):\n" + style_views + "\n\n---\n")
 
         prompt = f"""As the Research Manager and debate facilitator, your role is to critically evaluate this round of debate and deliver a clear, actionable investment plan for the trader.
 
@@ -36,7 +44,7 @@ def create_research_manager(llm):
 The debate always contains conflicting arguments; deciding which side is stronger is the job, so conflict alone is not a reason to Hold. Commit to the side with the stronger case, sized by how decisively it wins. Choose Hold only when the evidence is still balanced after that weighing, or too thin to support a call; do not manufacture a direction to appear decisive. Weigh the bull and bear cases on their merits, independent of which side spoke first or last.
 
 ---
-
+{learning_section}
 **Debate History:**
 {history}
 

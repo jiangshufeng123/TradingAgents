@@ -248,9 +248,14 @@ def scoreboard(
             from tradingagents.graph.trading_graph import TradingAgentsGraph
 
             with console.status("[cyan]Settling decisions whose holding window has traded…[/cyan]"):
-                outcome = TradingAgentsGraph(config=config).settle_all_pending()
+                graph = TradingAgentsGraph(config=config)
+                outcome = graph.settle_all_pending()
+                revised = graph.update_beliefs()
             if getattr(outcome, "failed", None):
                 console.print(f"[yellow]{len(outcome.failed)} decision(s) could not be settled now.[/yellow]")
+            if revised:
+                console.print(f"[green]Beliefs revised from {revised['based_on']} settled decisions:[/green]\n"
+                              f"{revised['beliefs']}\n")
         except Exception as exc:   # still show what is already settled
             console.print(f"[yellow]Settling failed ({exc}); showing what is already settled.[/yellow]")
     board = sb.build(config["memory_log_path"])

@@ -57,6 +57,7 @@ _SECTIONS = (
     ("II. Research Team Decision", "2_research", (
         ("Bull Researcher", "bull.md", ("investment_debate_state", "bull_history")),
         ("Bear Researcher", "bear.md", ("investment_debate_state", "bear_history")),
+        ("Style Panel", "styles.md", ("style_views",)),
         ("Research Manager", "manager.md", ("investment_plan",)),
     )),
     ("III. Trading Team Plan", "3_trading", (
@@ -104,12 +105,12 @@ def write_report_tree(final_state: dict, ticker: str, save_path, settings: dict 
     if vote_markdown:
         # Several runs voted: the vote comes first, then the run that carries it.
         parts.insert(0, ("0. Consensus Across Runs", "0_vote", [("Vote", "vote.md", vote_markdown)]))
-    if sizing_markdown:
-        # Shares, stop and book risk computed in code from the final rating.
-        parts.append(("VII. Position Sizing (computed)", "7_sizing", [("Sizing", "sizing.md", sizing_markdown)]))
     if usage_markdown:
         # The run's token usage and cost, as its own section and file.
         parts.append(("VI. Token Usage and Cost", "6_usage", [("Usage by role", "usage.md", usage_markdown)]))
+    if sizing_markdown:
+        # Shares, stop and book risk computed in code from the final rating.
+        parts.append(("VII. Position Sizing (computed)", "7_sizing", [("Sizing", "sizing.md", sizing_markdown)]))
     sections = []
     for heading, folder, written in parts:
         (save_path / folder).mkdir(exist_ok=True)

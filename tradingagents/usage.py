@@ -21,7 +21,7 @@ from pathlib import Path
 ROLE_ORDER = (
     "Market Analyst", "Social Analyst", "Sentiment Analyst", "News Analyst", "Fundamentals Analyst",
     "Memory Log",
-    "Bull Researcher", "Bear Researcher", "Research Manager",
+    "Bull Researcher", "Bear Researcher", "Style Panel", "Research Manager",
     "Trader",
     "Aggressive Analyst", "Conservative Analyst", "Neutral Analyst",
     "Portfolio Manager",

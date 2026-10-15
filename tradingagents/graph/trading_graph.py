@@ -15,7 +15,7 @@ from tradingagents.dataflows.date_window import get_current_date, is_historical
 from tradingagents.dataflows.symbols import safe_ticker_component
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.llm_clients import create_tier_client, tier_provider
-from tradingagents.memory import TradingMemoryLog, settlement
+from tradingagents.memory import TradingMemoryLog, learning, settlement
 from tradingagents.memory.reflection import Reflector
 from tradingagents.reporting import write_report_tree
 
@@ -120,7 +120,8 @@ class TradingAgentsGraph:
         self.selected_analysts = tuple(selected_analysts)
 
         # Set up the graph: keep the workflow for recompilation with a checkpointer.
-        self.workflow = self.graph_setup.setup_graph(selected_analysts, memory_node=self._memory_step)
+        self.workflow = self.graph_setup.setup_graph(selected_analysts, memory_node=self._memory_step,
+                                                     research_styles=self.config.get("research_styles"))
         self.graph = self.workflow.compile()
         self._checkpointer_ctx = None
         self._resuming = False
@@ -374,7 +375,24 @@ class TradingAgentsGraph:
             logger.warning("Reading the memory log failed: %s", exc)
             past_context = ""
             note = note or f"The memory log could not be read this run ({type(exc).__name__})."
-        return {"past_context": past_context, "memory_note": note}
+        learning_context = ""
+        try:
+            self.update_beliefs()
+            learning_context = learning.learning_context(
+                self.memory_log, self.config, state["company_of_interest"],
+                as_of=self._memory_as_of(state["trade_date"]))
+        except Exception as exc:   # learning is an aid; the run goes on without it
+            logger.warning("Reading the track record failed: %s", exc)
+        return {"past_context": past_context, "memory_note": note, "learning_context": learning_context}
+
+    def update_beliefs(self):
+        """Revise the learned beliefs when enough decisions have settled (tradingagents/memory/learning.py)."""
+        if not self.config.get("learn_beliefs", True):
+            return None
+        with self.memory_log.settling(wait=False) as held:
+            if not held:          # another run is settling and will revise them
+                return None
+            return learning.update_beliefs(self.memory_log, self.deep_thinking_llm, self.config)
 
     def settle_pending(self, company_name) -> settlement.Settlement:
         """Settle this ticker's decisions whose holding window has now traded.

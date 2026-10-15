@@ -54,6 +54,16 @@ def _a_share_money_flow(ticker: str, start_date: str, end_date: str) -> str:
         return f"A-share money flow: <unavailable: {type(exc).__name__}>"
 
 
+def _a_share_microstructure(ticker: str, end_date: str) -> str:
+    """Limit moves, 龙虎榜, margin balance and popularity rank for an A-share, or ""."""
+    from tradingagents.dataflows.vendors.akshare_cn import a_share_microstructure
+
+    try:
+        return a_share_microstructure(ticker, end_date)
+    except Exception as exc:   # an optional source never stops the sentiment report
+        return f"A-share trading signals: <unavailable: {type(exc).__name__}>"
+
+
 def _seven_days_back(trade_date: str) -> str:
     return (datetime.strptime(trade_date, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
 
@@ -101,10 +111,17 @@ def create_sentiment_analyst(llm):
         # A-shares: StockTwits and Reddit barely cover them; daily main-force
         # money flow is the local read on who is buying.
         flow_block = _a_share_money_flow(ticker, start_date, end_date)
+        micro_block = _a_share_microstructure(ticker, end_date)
+        if micro_block:
+            flow_block = f"{flow_block}\n\n{micro_block}" if flow_block else micro_block
         if flow_block:
             system_message += (
-                "\n\nAdditional source for this A-share listing (weigh it as a sentiment input; "
-                "StockTwits and Reddit coverage of A-shares is thin):\n" + flow_block
+                "\n\nAdditional sources for this A-share listing (weigh them as sentiment inputs; "
+                "StockTwits and Reddit coverage of A-shares is thin). Read them as positioning: "
+                "net buying by the seats on the 龙虎榜 and a rising margin balance mean active or "
+                "leveraged money is adding; a run of limit-up closes with a top popularity rank is "
+                "crowded momentum that can reverse sharply; limit-down closes can trap holders "
+                "under T+1:\n" + flow_block
             )
 
         prompt = ChatPromptTemplate.from_messages(

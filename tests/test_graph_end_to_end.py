@@ -150,7 +150,9 @@ def test_a_full_run_reaches_a_logged_decision(tmp_path, monkeypatch, offline, st
 @pytest.mark.unit
 def test_an_interrupted_run_resumes_from_its_checkpoint(tmp_path, monkeypatch, offline):
     model = ScriptedModel(fail_at=12)            # past the analysts, before the decision
-    graph = _graph(tmp_path, monkeypatch, model, checkpoint_enabled=True)
+    # The style panel asks in parallel, so which of its calls land before the
+    # failure varies; the call count below is exact only without it.
+    graph = _graph(tmp_path, monkeypatch, model, checkpoint_enabled=True, research_styles="off")
     with pytest.raises(RuntimeError, match="provider unavailable"):
         graph.propagate("NVDA", TRADE_DATE)
     calls_before = len(model.calls)
@@ -160,7 +162,7 @@ def test_an_interrupted_run_resumes_from_its_checkpoint(tmp_path, monkeypatch, o
     assert signal == "Overweight"
     resumed_calls = len(model.calls) - calls_before
     full_run = ScriptedModel()
-    _graph(tmp_path / "fresh", monkeypatch, full_run).propagate("NVDA", TRADE_DATE)
+    _graph(tmp_path / "fresh", monkeypatch, full_run, research_styles="off").propagate("NVDA", TRADE_DATE)
     # The resumed run makes only the calls the interrupted one had not completed.
     assert resumed_calls == len(full_run.calls) - (model.fail_at - 1)
 
