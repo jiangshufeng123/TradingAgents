@@ -496,6 +496,20 @@ def test_scoreboard_page_data(app, env, monkeypatch, tmp_path):
     assert [p["ticker"] for p in out["pending"]] == ["603980.SS"] and out["review_count"] == 1
     assert out["beliefs"][0]["based_on"] == 3 and "量能" in out["beliefs"][0]["beliefs"]
     assert out["follow"]["follow"] == pytest.approx(0.04 / 3) and out["holding_days"] == 5
+    assert out["screens"] == {"strategies": [], "pending": 0, "horizons": [5, 20], "benchmark": "000300.SS",
+                              "recent": []}
+
+
+@pytest.mark.unit
+def test_screen_presets_and_preset_only_requests(app):
+    ian = _client(app)
+    presets = ian.get("/api/screens/presets").json()
+    assert [p["key"] for p in presets["presets"]][:2] == ["balanced", "dividend_lowvol"]
+    assert presets["factors"]["low_vol"] == "低波动"
+    job = ian.post("/api/screens", json={"preset": "value_recovery"}, headers=H).json()
+    assert job["params"]["preset"] == "value_recovery" and job["params"]["request"] == ""
+    assert ian.post("/api/screens", json={"preset": "nope"}, headers=H).status_code == 422
+    assert ian.post("/api/screens", json={}, headers=H).status_code == 422
 
 
 @pytest.mark.unit

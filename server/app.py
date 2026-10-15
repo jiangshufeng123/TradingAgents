@@ -65,6 +65,7 @@ class AnalysisIn(BaseModel):
 
 class ScreenIn(BaseModel):
     request: str = ""
+    preset: str = Field("", description="Rank by this preset (tradingagents/scoring.py); alone, its filters too")
     spec: dict | None = Field(None, description="Edited conditions (as returned on a screen job)")
     where: str | None = None
     limit: int | None = Field(None, ge=1, le=200)
@@ -597,9 +598,12 @@ def create_app(config: dict | None = None, *, start_worker: bool = True, start_s
     @app.get("/api/scoreboard")
     def scoreboard_get(user: User = Depends(current_user)):
         """How the settled decisions have done (shared by all accounts, like the memory log)."""
-        from server.services import scoreboard as scoreboard_svc
+        from server.services import scoreboard as scoreboard_svc, screen_track
 
-        return scoreboard_svc.payload(config)
+        out = scoreboard_svc.payload(config)
+        with db.session() as s:
+            out["screens"] = screen_track.summary(s)
+        return out
 
     @app.get("/api/analyses/defaults")
     def analysis_defaults(user: User = Depends(current_user)):
@@ -634,10 +638,23 @@ def create_app(config: dict | None = None, *, start_worker: bool = True, start_s
 
     # --- screens ----------------------------------------------------------------------
 
+    @app.get("/api/screens/presets")
+    def screen_presets(user: User = Depends(current_user)):
+        """The ranking presets and the factors, for the screen page."""
+        from tradingagents.scoring import FACTORS, PRESETS
+
+        return {"factors": FACTORS, "presets": [{"key": p.key, "name": p.name, "summary": p.summary,
+                                                 "weights": p.weights, "filters": list(p.filters)}
+                                                for p in PRESETS.values()]}
+
     @app.post("/api/screens")
     def screen_create(body: ScreenIn, user: User = Depends(current_user)):
-        if not (body.request.strip() or body.spec or body.where):
-            raise HTTPException(422, "describe the stocks you want, or give conditions")
+        from tradingagents.scoring import PRESETS
+
+        if body.preset and body.preset not in PRESETS:
+            raise HTTPException(422, f"no preset {body.preset!r}")
+        if not (body.request.strip() or body.spec or body.where or body.preset):
+            raise HTTPException(422, "describe the stocks you want, choose a preset, or give conditions")
         if body.spec is not None:
             from tradingagents.screener import Spec
 

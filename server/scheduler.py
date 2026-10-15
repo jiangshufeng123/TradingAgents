@@ -96,6 +96,21 @@ class DailyScheduler:
         except Exception as exc:
             logger.warning("old service logs not cleaned: %s", exc)
 
+    @staticmethod
+    def _screen_check() -> None:
+        """After the close: the returns of screened picks old enough (services/screen_track.py)."""
+        from server.services import screen_track
+        from tradingagents import screener
+        from tradingagents.default_config import DEFAULT_CONFIG
+
+        try:
+            with db.session() as s:
+                n = screen_track.check(s, screener.price_loader(DEFAULT_CONFIG))
+            if n:
+                logger.info("screen check: returns filled for %d pick(s)", n)
+        except Exception as exc:
+            logger.warning("screen check skipped: %s", exc)
+
     def stop(self) -> None:
         if self.scheduler.running:
             self.scheduler.shutdown(wait=False)
@@ -107,6 +122,10 @@ class DailyScheduler:
             job.remove()
         self.scheduler.add_job(self._backup, CronTrigger(hour=3, minute=0, timezone=self.timezone),
                                id="backup", replace_existing=True, misfire_grace_time=6 * 3600, coalesce=True)
+        self.scheduler.add_job(self._screen_check, CronTrigger(day_of_week="mon-fri", hour=17, minute=40,
+                                                               timezone=self.timezone),
+                               id="screen-check", replace_existing=True, misfire_grace_time=12 * 3600,
+                               coalesce=True)
         with db.session() as s:
             rows = list(s.execute(select(Schedule, User).join(User, User.id == Schedule.user_id)
                                   .where(Schedule.enabled.is_(True), User.is_active.is_(True))))

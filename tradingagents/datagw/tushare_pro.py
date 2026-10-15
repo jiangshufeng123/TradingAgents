@@ -153,7 +153,7 @@ def cn_spot(day: str | None = None) -> pd.DataFrame:
     basic, as_of = pd.DataFrame(), None
     for d in reversed(days[-3:]):
         basic = query("daily_basic", trade_date=f"{d:%Y%m%d}",
-                      fields="ts_code,close,turnover_rate,volume_ratio,pe_ttm,pb,total_mv,circ_mv")
+                      fields="ts_code,close,turnover_rate,volume_ratio,pe_ttm,pb,dv_ttm,total_mv,circ_mv")
         if not basic.empty:
             as_of = d
             break
@@ -194,6 +194,7 @@ def cn_spot(day: str | None = None) -> pd.DataFrame:
         "60日涨跌幅": change_since(ref_60).values,
         "年初至今涨跌幅": change_since(ref_ytd).values,
         "行业": df["industry"],
+        "股息率": pd.to_numeric(df["dv_ttm"], errors="coerce") if "dv_ttm" in df.columns else float("nan"),
     })
     out.attrs["as_of"] = f"{as_of:%Y-%m-%d}"
     return out

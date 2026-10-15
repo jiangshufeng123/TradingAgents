@@ -462,19 +462,29 @@ def screen(
     yes: bool = typer.Option(False, "--yes", help="Run the interpreted conditions without asking"),
     add: str = typer.Option(None, "--add", help='Rows to add to the watchlist without the picker, e.g. "1,3" or "1-3" or "all"'),
     no_pick: bool = typer.Option(False, "--no-pick", help="Only show and save the results; add nothing"),
+    preset: str = typer.Option(None, "--preset", help="Rank by a preset: balanced, dividend_lowvol, quality_growth, "
+                                                       "value_recovery, trend_momentum (alone: its own filters too)"),
 ):
-    """Screen every A-share: plain language becomes conditions you check, then code filters the market."""
+    """Screen every A-share: plain language becomes conditions you check, then code filters the market
+    and ranks what passes by factor score."""
     from tradingagents import screener
     from tradingagents.dataflows.config import run_config
+    from tradingagents.scoring import PRESETS
 
-    if not request and not where:
-        console.print('[red]Say what to look for, e.g. tradingagents screen "低估值高ROE的白酒股", or use --where.[/red]')
+    if preset and preset not in PRESETS:
+        console.print(f"[red]No preset {preset!r}; one of: {', '.join(PRESETS)}[/red]")
+        raise typer.Exit(code=1)
+    if not request and not where and not preset:
+        console.print('[red]Say what to look for, e.g. tradingagents screen "低估值高ROE的白酒股", or use --where '
+                      'or --preset.[/red]')
         raise typer.Exit(code=1)
     with run_config(DEFAULT_CONFIG):
         with console.status("[cyan]Loading every A-share's quote and latest results…[/cyan]"):
             universe, period = screener.build_universe(DEFAULT_CONFIG)
     if where:
         spec = screener.parse_where(where)
+    elif preset and not request:
+        spec = screener.Spec.from_preset(preset)
     else:
         # Asked outside any spinner or run scope, the way scripts/probe_screen_llm.py
         # does: a call made under the spinner was seen never to return on Windows.
@@ -486,6 +496,8 @@ def screen(
                       f"(usually 10-30 s)…")
         spec = screener.interpret(request, llm, industries, period, universe.attrs.get("missing", []),
                                   progress=lambda s: console.print(f"  … {s:.0f}s"))
+    if preset:
+        spec.preset, spec.weights, spec.sort = preset, {}, []
     with run_config(DEFAULT_CONFIG):
         if limit:
             spec.limit = limit
@@ -499,16 +511,18 @@ def screen(
         if spec.explanation:
             console.print(f"  {spec.explanation}")
         console.print(spec.describe())
-        if not where and not yes and sys.stdin.isatty() and not typer.confirm("Run these conditions?", default=True):
+        if request and not where and not yes and sys.stdin.isatty() and \
+                not typer.confirm("Run these conditions?", default=True):
             raise typer.Exit()
-        result = screener.apply(spec, universe)
+        with console.status("[cyan]Scoring; fetching daily bars for the leaders…[/cyan]"):
+            result = screener.apply(spec, universe, load=screener.price_loader(DEFAULT_CONFIG))
     console.print("\n" + screener.render(result, spec, period))
     if result.empty:
         return
-    csv_path, latest = screener.save(result, spec, request or where, DEFAULT_CONFIG)
+    csv_path, latest = screener.save(result, spec, request or where or f"preset:{preset}", DEFAULT_CONFIG)
     console.print(f"\n[dim]Saved:[/dim] {csv_path}")
     if not no_pick:
-        _pick_into_watchlist(result, note=f"screen: {(request or where)[:40]}", rows=add)
+        _pick_into_watchlist(result, note=f"screen: {(request or where or preset)[:40]}", rows=add)
 
 
 def _pick_into_watchlist(result, note: str, rows: str | None = None) -> list[str]:
@@ -892,6 +906,25 @@ def service_status(port: int = typer.Option(8000, "--port")):
             console.print(f"[green]The service answers on port {port}.[/green] {resp.read().decode()[:80]}")
     except Exception as exc:
         console.print(f"[yellow]Nothing answers on port {port}: {exc}[/yellow]")
+
+
+@server_app.command("screen-check")
+def server_screen_check():
+    """Fill in how the screened picks did, 5 and 20 trading days on (the service does this
+    every trading evening at 17:40)."""
+    from server import db
+    from server.services import screen_track
+    from tradingagents import screener
+
+    db.init_db()
+    with db.session() as s:
+        n = screen_track.check(s, screener.price_loader(DEFAULT_CONFIG))
+        summary = screen_track.summary(s)
+    console.print(f"Returns filled for {n} pick(s); {summary['pending']} still waiting for 5 sessions.")
+    for row in summary["strategies"]:
+        ex = row["excess_5"]
+        console.print(f"  {row['name']}: {row['picks']} picks, {row['checked_5']} checked at 5 days"
+                      + (f", average excess {ex:+.2%}, beat the index {row['beat_5']:.0%}" if ex is not None else ""))
 
 
 @server_app.command("selfcheck")

@@ -43,6 +43,7 @@ FIELDS = {
     "amount": ("turnover value today", "亿元"),
     "pe": ("dynamic P/E (negative = loss-making)", "x"),
     "pb": ("price to book", "x"),
+    "dividend_yield": ("dividend yield, trailing 12 months (Tushare quotes only)", "%"),
     "mcap": ("total market cap", "亿元"),
     "float_mcap": ("free-float market cap", "亿元"),
     "chg_60d": ("price change over 60 days", "%"),
@@ -245,6 +246,8 @@ def build_universe(config: dict, spot_max_age: float = 3600) -> tuple[pd.DataFra
         "float_mcap": pd.to_numeric(spot["流通市值"], errors="coerce") / 1e8,
         "chg_60d": pd.to_numeric(spot["60日涨跌幅"], errors="coerce"),
         "chg_ytd": pd.to_numeric(spot["年初至今涨跌幅"], errors="coerce"),
+        "dividend_yield": (pd.to_numeric(spot["股息率"], errors="coerce") if "股息率" in spot.columns
+                           else float("nan")),
     })
     if results is not None and not results.empty:
         r = pd.DataFrame({
@@ -268,6 +271,7 @@ def build_universe(config: dict, spot_max_age: float = 3600) -> tuple[pd.DataFra
     df["ticker"] = df["code"].map(yahoo_symbol)
     df["st"] = df["name"].astype(str).str.upper().str.contains("ST")
     df.attrs["source"] = source
+    df.attrs["as_of"] = spot.attrs.get("as_of") or date.today().isoformat()   # the quotes' trading day
     df.attrs["missing"] = [f for f in FIELDS if df[f].isna().all()]
     return df, period
 
@@ -283,6 +287,9 @@ class Spec:
     sort: list[dict] = field(default_factory=list)
     limit: int = 20
     explanation: str = ""
+    # Ranking when no sort is given: a preset (tradingagents/scoring.py) or factor weights.
+    preset: str = ""
+    weights: dict = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict) -> "Spec":
@@ -294,8 +301,25 @@ class Spec:
             sort=[s for s in data.get("sort") or [] if s.get("field") in FIELDS],
             limit=max(1, min(int(data.get("limit") or 20), 200)),
             explanation=str(data.get("explanation") or ""),
+            preset=str(data.get("preset") or "") if str(data.get("preset") or "") in _presets() else "",
+            weights=_clean_weights(data.get("weights")),
         )
         return spec
+
+    @classmethod
+    def from_preset(cls, key: str, limit: int = 20) -> "Spec":
+        """A preset's own filters and weights, for a screen with no request to interpret."""
+        from tradingagents.scoring import PRESETS
+
+        p = PRESETS[key]
+        return cls(filters=[dict(f) for f in p.filters], preset=key, limit=limit,
+                   explanation=f"预设策略「{p.name}」：{p.summary}")
+
+    def ranking(self) -> dict:
+        """The factor weights this spec ranks by (empty when an explicit sort decides)."""
+        from tradingagents.scoring import weights_for
+
+        return {} if self.sort else weights_for(self.preset, self.weights)
 
     def describe(self) -> str:
         lines = []
@@ -311,8 +335,34 @@ class Spec:
         if self.sort:
             lines.append("- sort by: " + ", ".join(f"{s['field']} {'desc' if s.get('desc', True) else 'asc'}"
                                                   for s in self.sort))
+        else:
+            from tradingagents.scoring import FACTORS, PRESETS
+
+            w = self.ranking()
+            label = PRESETS[self.preset].name if self.preset and not self.weights else "custom weights"
+            lines.append(f"- ranked by factor score ({label}): " +
+                         ", ".join(f"{FACTORS[k]} {v:g}" for k, v in w.items()))
         lines.append(f"- top {self.limit}")
         return "\n".join(lines)
+
+
+def _presets() -> dict:
+    from tradingagents.scoring import PRESETS
+
+    return PRESETS
+
+
+def _clean_weights(raw) -> dict:
+    from tradingagents.scoring import FACTORS
+
+    out = {}
+    for k, v in (raw or {}).items() if isinstance(raw, dict) else []:
+        try:
+            if k in FACTORS and 0 < float(v) <= 10:
+                out[k] = float(v)
+        except (TypeError, ValueError):
+            continue
+    return out
 
 
 def _valid_filter(f: dict) -> bool:
@@ -338,8 +388,12 @@ def parse_where(text: str) -> Spec:
 
 
 def _prompt(request: str, industries: list[str], period: str, missing=()) -> str:
+    from tradingagents.scoring import FACTORS, PRESETS
+
     fields = "\n".join(f"- {name}: {desc}" + (f" [{unit}]" if unit else "")
                        for name, (desc, unit) in FIELDS.items() if name not in missing)
+    presets = "\n".join(f"- {p.key}: {p.name}，{p.summary}" for p in PRESETS.values())
+    factors = ", ".join(f"{k} ({v})" for k, v in FACTORS.items())
     return f"""Translate a stock-screening request for China A-shares into a JSON filter specification.
 
 Fields you may filter or sort on (results fields come from the {period[:4]}-{period[4:6]}-{period[6:]} report):
@@ -348,11 +402,17 @@ Fields you may filter or sort on (results fields come from the {period[:4]}-{per
 Industry names that exist in the data (use these exact strings, choosing every one that fits the request):
 {", ".join(industries)}
 
+Ranking: unless the request asks to sort by one field, leave "sort" empty and the stocks that pass are
+ranked by a factor score. Pick the preset that fits the request's intent (or "balanced"), and set
+"weights" only when the request states a mix the presets do not have:
+{presets}
+Factors for weights: {factors}
+
 Return only JSON, with this shape:
 {{"filters": [{{"field": "pe", "op": "<", "value": 20}}, {{"field": "mcap", "op": "between", "value": [50, 500]}}],
  "industries": ["..."], "exclude_industries": [], "exclude_st": true,
- "sort": [{{"field": "mcap", "desc": true}}], "limit": 20,
- "explanation": "one sentence in Chinese restating the conditions"}}
+ "sort": [], "preset": "quality_growth", "weights": {{}}, "limit": 20,
+ "explanation": "one sentence in Chinese restating the conditions and how they are ranked"}}
 
 Rules: op is one of < <= > >= == between. Percent fields take plain numbers (15 means 15%). Market caps are
 in 亿元. "Low valuation" without a number means pe between 0 and 20 and pb < 2; "profitable" means pe > 0;
@@ -415,7 +475,24 @@ def unavailable(spec: Spec, universe: pd.DataFrame) -> list[str]:
     return sorted({f["field"] for f in spec.filters + spec.sort} & missing)
 
 
-def apply(spec: Spec, universe: pd.DataFrame) -> pd.DataFrame:
+def price_loader(config: dict):
+    """``load(ticker, as_of)`` -> daily bars for the leaders' price metrics. Each call sets the
+    config itself: the scoring fetches on worker threads, which do not inherit it."""
+    from tradingagents.dataflows.config import run_config
+    from tradingagents.dataflows.vendors.yahoo.ohlcv import load_ohlcv
+
+    def load(ticker: str, as_of: str):
+        with run_config(config):
+            return load_ohlcv(ticker, as_of)
+    return load
+
+
+def apply(spec: Spec, universe: pd.DataFrame, as_of: str | None = None, load=None,
+          tech_top: int = 60) -> pd.DataFrame:
+    """The listings that pass ``spec``'s filters, best first: by the requested sort, else by
+    factor score (tradingagents/scoring.py; ``load(ticker, as_of)`` gives the daily bars for
+    the leaders' price metrics, None to rank on quotes and results alone). Every row carries
+    the factor scores either way."""
     df = universe[universe["ticker"].notna()].copy()
     if spec.exclude_st:
         df = df[~df["st"]]
@@ -434,20 +511,25 @@ def apply(spec: Spec, universe: pd.DataFrame) -> pd.DataFrame:
             industry = df["industry"].fillna("").astype(str)
         if spec.exclude_industries:
             df = df[~industry.map(lambda x: any(k in x for k in spec.exclude_industries)).astype(bool)]
+    from tradingagents import scoring
+
     if spec.sort:
+        df = scoring.score(df, scoring.weights_for(spec.preset, spec.weights)) if not df.empty else df
         df = df.sort_values([s["field"] for s in spec.sort],
                             ascending=[not s.get("desc", True) for s in spec.sort], na_position="last")
-    else:
-        df = df.sort_values("mcap", ascending=False, na_position="last")
-    return df.head(spec.limit).reset_index(drop=True)
+        return df.head(spec.limit).reset_index(drop=True)
+    return scoring.rank(df, spec.ranking(), spec.limit, as_of or date.today().isoformat(), load, tech_top)
 
 
-SHOW = ["ticker", "name", "industry", "price", "chg_pct", "pe", "pb", "mcap", "roe_annualized",
-        "revenue_yoy", "profit_yoy", "chg_60d"]
+SHOW = ["ticker", "name", "industry", "score", "price", "chg_pct", "pe", "pb", "dividend_yield", "mcap",
+        "roe_annualized", "revenue_yoy", "profit_yoy", "chg_60d",
+        "value_score", "quality_score", "growth_score", "momentum_score", "low_vol_score", "liquidity_score",
+        "mom_120_20", "vol_60", "drawdown_60"]
 
 
 def render(result: pd.DataFrame, spec: Spec, period: str) -> str:
-    cols = [c for c in SHOW if c in result.columns]
+    cols = [c for c in SHOW if c in result.columns and not c.endswith("_score")
+            and c not in ("mom_120_20", "vol_60", "drawdown_60", "dividend_yield")]
     for f in spec.filters + spec.sort:
         if f["field"] not in cols and f["field"] in result.columns:
             cols.append(f["field"])

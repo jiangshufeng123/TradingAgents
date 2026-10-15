@@ -270,26 +270,42 @@ def run_screen(job: Job, user: User, config: dict, should_stop) -> dict:
     note(f"universe: {len(universe)} listings, quotes from {universe.attrs.get('source')}, results {period}")
     if should_stop():
         raise Cancelled()
+    preset = job.params.get("preset") or ""
     if job.params.get("spec"):                     # conditions the user edited
         spec = screener.Spec.from_dict(job.params["spec"])
     elif job.params.get("where"):
         spec = screener.parse_where(job.params["where"])
+    elif preset and not request.strip():           # a preset alone: no model needed
+        spec = screener.Spec.from_preset(preset)
     else:
         industries = sorted(universe["industry"].dropna().astype(str).unique())
         spec = screener.interpret(request, create_tier_client(config, "quick").get_llm(), industries,
                                   period, universe.attrs.get("missing", []),
                                   progress=lambda secs: note(f"waiting for the model ({secs:.0f}s)"))
+    if preset and not job.params.get("spec"):     # the user's choice of ranking wins over the model's
+        spec.preset, spec.weights, spec.sort = preset, {}, []
     if job.params.get("limit"):
         spec.limit = int(job.params["limit"])
     note(f"conditions: {spec.describe()}")
+    note("scoring: quotes and results for every listing that passes, daily bars for the leaders")
     with run_config(config):
-        result = screener.apply(spec, universe)
+        result = screener.apply(spec, universe, load=screener.price_loader(config))
     screener.save(result, spec, request, config)
     note(f"{len(result)} candidate(s)")
+    try:                                           # the top picks, checked against the index later
+        from server.services import screen_track
+
+        with db.session() as s:
+            kept = screen_track.record(s, job.id, user.id, result, spec, universe.attrs.get("as_of"),
+                                       label=request[:60] if request.strip() else "")
+        if kept:
+            note(f"kept the top {kept} for the forward check (5 and 20 trading days)")
+    except Exception as exc:
+        note(f"forward check not recorded: {exc}")
     keep = [c for c in screener.SHOW if c in result.columns]
     rows = json.loads(result[keep].to_json(orient="records", force_ascii=False))
     return {"request": request, "conditions": spec.describe(), "explanation": spec.explanation or "",
-            "spec": dataclasses.asdict(spec),
+            "spec": dataclasses.asdict(spec), "ranking": spec.ranking(),
             "unavailable": screener.unavailable(spec, universe), "period": period,
             "source": universe.attrs.get("source"), "rows": rows}
 

@@ -295,6 +295,12 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
 .note.banner { margin: 0 0 16px; max-width: 1160px; }
 .warn-text { color: var(--warn); }
 
+/* factor score columns on the screen page */
+.fbars { display: inline-flex; align-items: flex-end; gap: 2px; height: 22px; vertical-align: middle; }
+.fb { position: relative; display: inline-block; width: 6px; height: 22px; background: var(--grid); border-radius: 2px 2px 0 0; }
+.fb i { position: absolute; left: 0; right: 0; bottom: 0; background: var(--line-strong); border-radius: 2px 2px 0 0; }
+.fb.on i { background: var(--series-1); }
+
 /* scoreboard */
 .kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
 .kpis .fact { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-m); padding: 14px 16px; }

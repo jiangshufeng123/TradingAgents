@@ -124,3 +124,27 @@ class AuthSession(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime)
     last_seen: Mapped[datetime] = mapped_column(DateTime, default=_now)
     user_agent: Mapped[str] = mapped_column(String(200), default="")
+
+
+class ScreenPick(Base):
+    """A stock a screen ranked near the top, kept to check later how it did (screen_track.py).
+
+    One row per trading day, strategy and stock, whoever ran the screen and however often:
+    a stock picked twice the same day by the same strategy counts once."""
+    __tablename__ = "screen_picks"
+    __table_args__ = (UniqueConstraint("as_of", "strategy", "ticker"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    job_id: Mapped[int | None] = mapped_column(ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    as_of: Mapped[str] = mapped_column(String(10), index=True)          # the quotes' trading day
+    strategy: Mapped[str] = mapped_column(String(32), index=True)        # a preset key, or "custom"
+    label: Mapped[str] = mapped_column(String(120), default="")
+    rank: Mapped[int] = mapped_column(Integer)
+    ticker: Mapped[str] = mapped_column(String(32))
+    score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ret_5: Mapped[float | None] = mapped_column(Float, nullable=True)     # close-to-close, 5 sessions on
+    bench_5: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ret_20: Mapped[float | None] = mapped_column(Float, nullable=True)
+    bench_20: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
