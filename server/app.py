@@ -80,6 +80,16 @@ class ScheduleIn(BaseModel):
     runs: int = Field(2, ge=1, le=5)
 
 
+class PaperOpenIn(BaseModel):
+    cash: float = Field(1_000_000, gt=0, le=1e11)
+    currency: str = Field("CNY", pattern="^(CNY|HKD|USD)$")
+    restart: bool = Field(False, description="Start over when an account already exists")
+
+
+class PaperSwitchIn(BaseModel):
+    enabled: bool
+
+
 class PasswordIn(BaseModel):
     old_password: str
     new_password: str
@@ -141,6 +151,15 @@ def _job_out(j: Job, detail: bool = False) -> dict:
     return out
 
 
+def _norm(ticker: str) -> str:
+    from tradingagents.dataflows.symbols import normalize_symbol
+
+    try:
+        return str(normalize_symbol((ticker or "").strip())).upper()
+    except Exception:
+        return (ticker or "").strip().upper()
+
+
 def create_app(config: dict | None = None, *, start_worker: bool = True, start_scheduler: bool = True,
                cookie_secure: bool | None = None) -> FastAPI:
     from tradingagents.default_config import DEFAULT_CONFIG
@@ -179,6 +198,20 @@ def create_app(config: dict | None = None, *, start_worker: bool = True, start_s
     app = FastAPI(title="TradingAgents", version="0.1", lifespan=lifespan)
     app.state.ta = state
 
+    from fastapi.responses import PlainTextResponse as _Text
+
+    from server.access import allowed_networks, is_allowed
+
+    nets = allowed_networks()
+
+    @app.middleware("http")
+    async def only_allowed_networks(request: Request, call_next):
+        """Refuse clients outside this computer, the home network and Tailscale (see server/access.py)."""
+        if not is_allowed(request.client.host if request.client else None, nets):
+            return _Text("403: this service only accepts this computer, the home network and Tailscale",
+                         status_code=403)
+        return await call_next(request)
+
     # --- authentication --------------------------------------------------------------
 
     def current_user(request: Request) -> User:
@@ -197,6 +230,63 @@ def create_app(config: dict | None = None, *, start_worker: bool = True, start_s
         if user.role != "admin":
             raise HTTPException(403, "administrators only")
         return user
+
+    def _decisions(s, user: User, limit: int = 30) -> list[dict]:
+        """Each stock's latest decision, newest first: from this user's cost ledger (every run the
+        CLI or the web made for them; an administrator also sees the pre-web ledger), linked to the
+        web job that produced it when there is one. One row per listing (600519.SS = 600519.SH)."""
+        from sqlalchemy import select
+
+        from server.runner import ledger_rows, reports_base, user_reports_dir
+
+        paths = [user_reports_dir(config, user) / "cost_ledger.csv"]
+        if user.role == "admin":
+            paths.append(reports_base(config) / "cost_ledger.csv")
+        rows = [r for path in paths for r in ledger_rows(path)]
+        job_of = {}
+        for j in s.scalars(select(Job).where(Job.user_id == user.id, Job.kind == "analysis", Job.status == "done")
+                           .order_by(Job.id.desc()).limit(100)):
+            for i, r in enumerate((j.result or {}).get("runs") or []):
+                job_of[(_norm(r.get("ticker")), r.get("run_time"))] = (j.id, i)
+
+        def num(v):
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
+        out, seen = [], set()
+        for r in sorted(rows, key=lambda r: r.get("run_time") or "", reverse=True):
+            key = _norm(r.get("ticker"))
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            job = job_of.get((key, r.get("run_time")))
+            out.append({"ticker": r.get("ticker"), "rating": r.get("rating"), "action": r.get("action") or None,
+                        "target_weight": num(r.get("target_weight")), "stop": num(r.get("stop")),
+                        "vote_ratings": r.get("vote_ratings"), "trade_date": r.get("trade_date"),
+                        "run_time": r.get("run_time"), "cost": num(r.get("cost")),
+                        "job_id": job[0] if job else None, "index": job[1] if job else None,
+                        "report_dir": r.get("report_dir") or None})
+            if len(out) >= limit:
+                break
+        return out
+
+    def _report_path(user: User, report_dir: str, fmt: str) -> Path:
+        from server.runner import reports_base, user_reports_dir
+
+        base = (reports_base(config) if user.role == "admin" else user_reports_dir(config, user)).resolve()
+        name = "complete_report.html" if fmt == "html" else "complete_report.md"
+        path = (Path(report_dir) / name).resolve()
+        if base not in path.parents or not path.exists():
+            raise HTTPException(404, "report file not found")
+        return path
+
+    @app.get("/api/report")
+    def report_by_dir(dir: str, fmt: str = "html", user: User = Depends(current_user)):
+        """A saved report by its folder (decisions made outside a web job carry only the folder)."""
+        path = _report_path(user, dir, fmt)
+        return FileResponse(path, media_type="text/html" if fmt == "html" else "text/markdown")
 
     @app.get("/api/health")
     def health():
@@ -256,14 +346,7 @@ def create_app(config: dict | None = None, *, start_worker: bool = True, start_s
             spend = costs.month_spend(s, user.id)
             n_watch = len(watchlist.tickers(s, user.id))
             sched = s.get(Schedule, user.id)
-            from sqlalchemy import select
-
-            from server.models import CostEntry
-
-            decisions = [{"ticker": c.ticker, "rating": c.rating, "trade_date": c.trade_date,
-                          "run_time": _iso(c.run_time), "job_id": c.job_id, "cost": c.cost}
-                         for c in s.scalars(select(CostEntry).where(CostEntry.user_id == user.id)
-                                            .order_by(CostEntry.run_time.desc()).limit(10))]
+            decisions = _decisions(s, user)
         nxt = state["scheduler"].next_run(user.id) if state["scheduler"] else None
         return {
             "user": _user_out(user), "watchlist_count": n_watch, "active_jobs": active, "recent_jobs": recent,
@@ -282,6 +365,18 @@ def create_app(config: dict | None = None, *, start_worker: bool = True, start_s
         if not llm_balance.supported(provider):
             return {"provider": provider, "ok": False, "error": "this provider publishes no balance"}
         return llm_balance.balance(provider)
+
+    @app.get("/api/names")
+    def security_names(t: str = "", user: User = Depends(current_user)):
+        """Names for up to 60 comma-separated tickers: {ticker: name or null}."""
+        from tradingagents.dataflows.config import run_config
+        from tradingagents.names import names_for
+
+        tickers = [x.strip().upper() for x in t.split(",") if x.strip()][:60]
+        if any(not TICKER.match(x) for x in tickers):
+            raise HTTPException(422, "not a ticker list")
+        with run_config(config):
+            return names_for(tickers)
 
     @app.get("/api/datasources")
     def datasources(user: User = Depends(current_user)):
@@ -352,16 +447,66 @@ def create_app(config: dict | None = None, *, start_worker: bool = True, start_s
 
     @app.get("/api/paper")
     def paper(user: User = Depends(current_user)):
+        """The user's paper account: valuation, daily equity against the benchmark, recent trades."""
+        import csv as _csv
+
         from server.services import paper as paper_svc
         from tradingagents.dataflows.config import run_config
-        from tradingagents.paper import render_status
 
         account = paper_svc.account(config, user.id)
-        if not account.path.exists():
-            return {"enabled": bool(config.get("paper_trading")), "exists": False}
-        with run_config(config):
-            text = render_status(account, date.today().isoformat())
-        return {"enabled": bool(config.get("paper_trading")), "exists": True, "status_markdown": text}
+        out = {"exists": account.path.exists(), "orders_on": paper_svc.orders_on(config, user.id),
+               "benchmark": config.get("paper_benchmark") or "",
+               "currency": account.state.get("base") or config.get("paper_currency") or "CNY"}
+        if not out["exists"]:
+            return out
+        out["start_date"] = account.state.get("start_date")
+        out["last_update"] = account.state.get("last_update")
+
+        def rows(name):
+            path = account.dir / name
+            if not path.exists():
+                return []
+            with open(path, encoding="utf-8-sig", newline="") as f:
+                return list(_csv.DictReader(f))
+
+        def num(v):
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
+        try:
+            with run_config(config):
+                v = account.valuation(date.today().isoformat())
+        except Exception as exc:      # prices unavailable: still show the history
+            v = {"error": f"{type(exc).__name__}: {exc}"}
+        out["valuation"] = v
+        out["start_cash"] = account.state.get("start_cash")
+        out["pending"] = account.state.get("pending") or []
+        out["equity"] = [{"date": r["date"], "equity": num(r.get("equity")), "return": num(r.get("return")),
+                          "benchmark_return": num(r.get("benchmark_return"))} for r in rows("equity.csv")]
+        out["trades"] = list(reversed(rows("trades.csv")))[:50]
+        return out
+
+    @app.post("/api/paper/open")
+    def paper_open(body: PaperOpenIn, user: User = Depends(current_user)):
+        """Open the paper account (or start it over with ``restart``)."""
+        from server.services import paper as paper_svc
+
+        if paper_svc.exists(config, user.id) and not body.restart:
+            raise HTTPException(409, "the paper account already exists; start over to reset it")
+        paper_svc.open_account(config, user.id, body.cash, body.currency)
+        return paper(user)
+
+    @app.put("/api/paper/switch")
+    def paper_switch(body: PaperSwitchIn, user: User = Depends(current_user)):
+        """Turn automatic paper orders on or off for this user's analyses."""
+        from server.services import paper as paper_svc
+
+        if not paper_svc.exists(config, user.id):
+            raise HTTPException(409, "open the paper account first")
+        paper_svc.set_enabled(config, user.id, body.enabled)
+        return {"orders_on": paper_svc.orders_on(config, user.id)}
 
     # --- jobs -------------------------------------------------------------------------
 
@@ -407,18 +552,13 @@ def create_app(config: dict | None = None, *, start_worker: bool = True, start_s
     @app.get("/api/jobs/{job_id}/report/{index}")
     def job_report(job_id: int, index: int, fmt: str = "html", user: User = Depends(current_user)):
         """The saved report of the job's ``index``-th run (html or md)."""
-        from server.runner import reports_base
 
         with db.session() as s:
             job = _own_job(s, job_id, user)
             runs = (job.result or {}).get("runs") or []
         if not 0 <= index < len(runs) or not runs[index].get("report_dir"):
             raise HTTPException(404, "no report for that run")
-        name = "complete_report.html" if fmt == "html" else "complete_report.md"
-        path = (Path(runs[index]["report_dir"]) / name).resolve()
-        base = reports_base(config).resolve()
-        if base not in path.parents or not path.exists():
-            raise HTTPException(404, "report file not found")
+        path = _report_path(user, runs[index]["report_dir"], fmt)
         return FileResponse(path, media_type="text/html" if fmt == "html" else "text/markdown")
 
     # --- analyses ---------------------------------------------------------------------
@@ -600,5 +740,10 @@ def create_app(config: dict | None = None, *, start_worker: bool = True, start_s
                 auth.revoke_user(s, target.id)
             return _user_out(target)
 
+    static = Path(__file__).resolve().parent / "static"
+    if static.exists():
+        from fastapi.staticfiles import StaticFiles
+
+        app.mount("/", StaticFiles(directory=static, html=True), name="pages")
     app.state.wake = _wake
     return app

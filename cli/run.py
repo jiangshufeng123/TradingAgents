@@ -153,12 +153,18 @@ def run_analysis(checkpoint: bool | None = None, portfolio=None, flags=None):
     vote_runs = _vote_runs(flags, config)
 
     stats_handler = StatsCallbackHandler()
+    progress = None
 
     # Normalize analyst selection to predefined order (selection is a 'set', order is fixed)
     selected_set = {analyst.value for analyst in selections["analysts"]}
     selected_analyst_keys = [a for a in ANALYST_ORDER if a in selected_set]
     analyst_execution_plan = build_analyst_execution_plan(selected_analyst_keys)
     analyst_wall_time_tracker = AnalystWallTimeTracker(analyst_execution_plan)
+    from cli import progress as plain_progress
+
+    if plain_progress.enabled():
+        # No terminal to draw on (the web service's jobs): one line per step instead.
+        progress = plain_progress.PlainProgress([spec.agent_node for spec in analyst_execution_plan.specs])
 
     graph = TradingAgentsGraph(
         selected_analyst_keys,
@@ -226,7 +232,10 @@ def run_analysis(checkpoint: bool | None = None, portfolio=None, flags=None):
 
     # The alternate screen keeps a layout taller than the window from redrawing
     # by scrolling; the final report prints after this block, on the normal screen.
-    with Live(layout, refresh_per_second=4, screen=True):
+    from contextlib import nullcontext
+
+    live = nullcontext() if progress else Live(layout, refresh_per_second=4, screen=True)
+    with live:
         # Initial display
         update_display(layout, stats_handler=stats_handler, start_time=start_time)
 
@@ -261,7 +270,9 @@ def run_analysis(checkpoint: bool | None = None, portfolio=None, flags=None):
         )
         # Pass callbacks to graph config for tool execution tracking
         # (LLM tracking is handled separately via LLM constructor)
-        args = graph.propagator.get_graph_args(callbacks=[stats_handler])
+        args = graph.propagator.get_graph_args(callbacks=[stats_handler] + ([progress] if progress else []))
+        if progress:
+            progress.new_run(1, vote_runs)
 
         # Recompile with a checkpointer and inject the thread_id so --checkpoint
         # actually saves and resumes on the CLI path (#1249); a no-op when
@@ -430,7 +441,7 @@ def run_analysis(checkpoint: bool | None = None, portfolio=None, flags=None):
 
     vote, run_states = None, [final_state]
     if vote_runs > 1:
-        run_states += _extra_runs(graph, selections, portfolio, stats_handler, vote_runs)
+        run_states += _extra_runs(graph, selections, portfolio, stats_handler, vote_runs, progress)
         vote = consensus([run_rating(state) for state in run_states])
         _print_vote(vote)
         if vote["representative"] is not None:
@@ -514,7 +525,7 @@ def _vote_runs(flags: dict, config: dict) -> int:
         raise typer.BadParameter(f"vote_runs must be a whole number, got {value!r}") from None
 
 
-def _extra_runs(graph, selections, portfolio, stats_handler, total: int) -> list[dict]:
+def _extra_runs(graph, selections, portfolio, stats_handler, total: int, progress=None) -> list[dict]:
     """Runs 2..total of the same analysis, without the live display.
 
     A run that fails is reported and left out of the vote rather than ending it.
@@ -528,7 +539,10 @@ def _extra_runs(graph, selections, portfolio, stats_handler, total: int) -> list
                 with run_config(graph.config):
                     init = graph.create_run_state(selections["ticker"], selections["analysis_date"],
                                                   selections["asset_type"], portfolio)
-                    state = graph.graph.invoke(init, **graph.propagator.get_graph_args(callbacks=[stats_handler]))
+                    if progress:
+                        progress.new_run(n, total)
+                    callbacks = [stats_handler] + ([progress] if progress else [])
+                    state = graph.graph.invoke(init, **graph.propagator.get_graph_args(callbacks=callbacks))
             except Exception as e:   # one failed run must not cost the others
                 console.print(f"[yellow]Run {n}/{total} failed and is left out of the vote: {e}[/yellow]")
                 continue

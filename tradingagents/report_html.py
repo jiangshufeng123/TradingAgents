@@ -64,6 +64,7 @@ a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.2em 0.5em;
 }
 .masthead .rating { font-weight: 500; }
+.masthead .name { font-weight: 400; color: var(--muted); }
 .rating.up { color: var(--up); } .rating.down { color: var(--down); } .rating.level { color: var(--level); }
 .rating.review { color: var(--muted); font-style: italic; }
 .masthead .date { margin: 0.55rem 0 1.5rem; font: 1rem/1.4 var(--sans); color: var(--muted); }
@@ -252,7 +253,13 @@ def render_report(ticker: str, final_state: dict, settings: dict | None, parts) 
     tone = _TONE.get(rating, "review")
     date = final_state.get("trade_date", "")
 
+    from tradingagents.reporting import _titled
+
+    shown = _titled(ticker)
+    security = shown[len(ticker):].strip()
     title = f'<span class="ticker">{escape(ticker)}</span>'
+    if security:
+        title += f' <span class="name">{escape(security)}</span>'
     if rating:
         title += f' <span class="rating {tone}">{escape(rating)}</span>'
     details = "".join(
@@ -275,7 +282,7 @@ def render_report(ticker: str, final_state: dict, settings: dict | None, parts) 
             body.append(f'<h3 id="s{n}-{m}">{escape(agent)}</h3>\n{_render_agent_text(md, text)}')
         body.append("</section>")
 
-    page_title = " ".join(x for x in (ticker, date, rating) if x)
+    page_title = " ".join(x for x in (ticker, security, date, rating) if x)
     return f"""<!doctype html>
 <html lang="en">
 <head>

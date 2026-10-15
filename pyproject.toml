@@ -65,6 +65,7 @@ include = ["tradingagents*", "cli*", "server*"]
 
 [tool.setuptools.package-data]
 cli = ["static/*"]
+server = ["static/*", "static/vendor/*"]
 tradingagents = ["assets/*.svg"]
 
 [tool.pytest.ini_options]

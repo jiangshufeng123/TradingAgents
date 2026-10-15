@@ -121,21 +121,42 @@ def analysis_env(config: dict, user: User) -> dict:
         "TRADINGAGENTS_REPORTS_DIR": str(user_reports_dir(config, user)),
         "TRADINGAGENTS_PAPER_DIR": str(paper_svc.user_dir(config, user.id)),
         "TRADINGAGENTS_DAILY_SCREEN": "",          # the web screens on request, never inside a batch
+        # Each user's own switch (opened and on in the web page), not the shared .env setting.
+        "TRADINGAGENTS_PAPER_TRADING": "true" if paper_svc.orders_on(config, user.id) else "false",
         "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1", "COLUMNS": "120", "NO_COLOR": "1",
+        # Write each line as it comes, and print a line per step (no terminal display to draw).
+        "PYTHONUNBUFFERED": "1", "TRADINGAGENTS_PLAIN_PROGRESS": "1",
     })
     return env
 
 
 PROGRESS = re.compile(r"(\d+)/(\d+) (\S+) \d{4}-\d{2}-\d{2}")
+STEP = re.compile(r"^(\d\d:\d\d:\d\d) \[进度 (\d+)/(\d+)\] (?:第 (\d+)/(\d+) 次运行 )?(.+)$", re.M)
+STEP_LINE = re.compile(r"^\d\d:\d\d:\d\d \[(?:进度 \d+/\d+|工具|运行|出错)\] .*$", re.M)
 
 
 def progress(log_text: str) -> dict | None:
-    """Which ticker of the batch is running, from the batch's section rules."""
+    """Where the batch is: which ticker, and (from the plain progress lines) which step of
+    which vote run, with the fraction of the batch done."""
     found = PROGRESS.findall(log_text)
     if not found:
         return None
     index, total, ticker = found[-1]
-    return {"index": int(index), "total": int(total), "ticker": ticker}
+    out = {"index": int(index), "total": int(total), "ticker": ticker}
+    # Steps only count after this ticker's rule.
+    tail = log_text[log_text.rfind(f"{index}/{total} {ticker}"):]
+    steps = STEP.findall(tail)
+    lines = STEP_LINE.findall(tail)
+    within = 0.0
+    if steps:
+        _, done, of, run, runs, text = steps[-1]
+        run, runs = int(run or 1), int(runs or 1)
+        out.update(step=text.strip(), step_done=int(done), step_total=int(of), run=run, runs=runs)
+        within = ((run - 1) + int(done) / max(int(of), 1)) / max(runs, 1)
+    if lines:
+        out["last_line"] = lines[-1][:200]
+    out["fraction"] = round(((int(index) - 1) + min(within, 0.99)) / max(int(total), 1), 4)
+    return out
 
 
 def run_analysis(job: Job, user: User, config: dict, should_stop, poll: float = 2.0) -> dict:

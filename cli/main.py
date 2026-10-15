@@ -285,12 +285,16 @@ def daily(
             console.print(f"[yellow]{ticker} failed: {exc}[/yellow]")
     console.rule("[bold]Daily run finished")
     console.print(f"Analyzed {len(done)}/{len(names)}: {', '.join(done) or '-'}")
+    from tradingagents.names import name_of
+
     for result in results:
-        sizing = result.get("sizing")
+        sizing, ticker = result.get("sizing"), result.get("ticker")
+        name = name_of(ticker) if ticker else None
         if sizing is not None:
-            console.print(f"  {sizing_summary(sizing)}")
-        elif result.get("ticker"):
-            console.print(f"  {result['ticker']}: {result.get('rating') or 'REVIEW'}")
+            line = sizing_summary(sizing)
+            console.print(f"  {line.replace(sizing.ticker, f'{sizing.ticker} {name}', 1) if name else line}")
+        elif ticker:
+            console.print(f"  {ticker}{' ' + name if name else ''}: {result.get('rating') or 'REVIEW'}")
     if book is None:
         console.print("[dim]No portfolio set (TRADINGAGENTS_PORTFOLIO): sizes are weights of equity, "
                       "not share counts.[/dim]")
@@ -640,13 +644,192 @@ def server_run(
         if not users.admins(s):
             console.print("[red]No administrator yet: run `tradingagents server init --admin <name>` first.[/red]")
             raise typer.Exit(code=1)
-    if host not in ("127.0.0.1", "localhost"):
-        console.print(f"[yellow]Listening on {host}: other devices on that network can reach the sign-in page. "
-                      "Use strong passwords; put HTTPS in front before exposing it to the internet.[/yellow]")
-    console.print(f"[green]TradingAgents service[/green] on http://{'127.0.0.1' if host == '0.0.0.0' else host}:{port} "
+    from server.access import allowed_networks, local_addresses
+
+    try:
+        nets = allowed_networks()
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+    console.print(f"[green]TradingAgents service[/green] on this computer: http://127.0.0.1:{port}  "
                   f"(API docs at /docs); database {db.default_url()}")
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        names = {"tailscale": "Tailscale (phone, laptop anywhere)", "lan": "home network", "other": "other"}
+        for addr, kind in local_addresses():
+            console.print(f"  {names[kind]:<36} http://{addr}:{port}")
+        console.print(f"[dim]Accepted from: {', '.join(str(n) for n in nets)} "
+                      "(TRADINGAGENTS_ALLOWED_NETS). Use strong passwords.[/dim]")
     uvicorn.run(create_app(DEFAULT_CONFIG, start_worker=worker, start_scheduler=scheduler),
                 host=host, port=port, log_level="info")
+
+
+SERVER_TASK = "TradingAgents Server"
+service_app = typer.Typer(help="Run the web service by itself after you sign in to Windows.")
+server_app.add_typer(service_app, name="service")
+
+
+def _startup_launcher() -> "Path":
+    """The launcher in the user's Startup folder (runs at sign-in; no administrator rights needed)."""
+    import os
+    from pathlib import Path
+
+    base = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
+    return base / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / f"{SERVER_TASK}.vbs"
+
+
+@service_app.command("install")
+def service_install(
+    host: str = typer.Option("0.0.0.0", "--host", help="0.0.0.0: reachable from the home network and Tailscale; "
+                                                      "127.0.0.1: this computer only"),
+    port: int = typer.Option(8000, "--port"),
+    start: bool = typer.Option(True, "--start/--no-start", help="Start it now as well"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Restart even if an analysis is running"),
+):
+    """Run the service in the background each time you sign in to Windows (scripts/run_server.ps1).
+
+    A small launcher goes in your Startup folder, so no administrator rights are needed.
+    """
+    import subprocess
+
+    script = _project_dir() / "scripts" / "run_server.ps1"
+    if not _on_windows():
+        console.print(f"Not Windows: run `tradingagents server run --host {host} --port {port}` under systemd "
+                      "or a process manager instead.")
+        return
+    if start and not _confirm_interrupt(yes):
+        raise typer.Exit(code=1)
+    command = (f'powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{script}"" '
+               f"-BindHost {host} -Port {port}")
+    launcher = _startup_launcher()
+    launcher.parent.mkdir(parents=True, exist_ok=True)
+    # Window style 0: no console window at all; False: do not wait for it.
+    launcher.write_text(f'CreateObject("WScript.Shell").Run "{command}", 0, False\r\n', encoding="utf-16")
+    console.print(f"[green]Installed:[/green] {launcher}")
+    if start:
+        _stop_service_processes()          # a previous copy would hold the port
+        subprocess.Popen(["wscript.exe", str(launcher)])
+        console.print("Started in the background; it answers in about 10 seconds "
+                      "(check with: tradingagents server service status).")
+    console.print(f"The service starts each time you sign in to Windows and restarts itself if it stops. "
+                  f"Logs: {_project_dir() / 'logs'}\\server_<date>.log")
+    console.print("Keep the computer awake (Settings > System > Power: never sleep when plugged in), or the "
+                  "service and the daily schedule pause with it.")
+    if host not in ("127.0.0.1", "localhost"):
+        console.print("Other devices also need the firewall opened once, from an administrator window: "
+                      "[bold]tradingagents server firewall[/bold]")
+
+
+def _running_jobs() -> list:
+    """Jobs the service is running now (a restart would cut them off)."""
+    try:
+        from server import db
+        from server.models import Job
+        from server.services import jobs
+
+        db.init_db()
+        with db.session() as s:
+            return [(j.id, j.kind, j.params) for j in jobs.active(s) if j.status in ("running", "cancelling")]
+    except Exception:
+        return []
+
+
+def _confirm_interrupt(yes: bool) -> bool:
+    running = _running_jobs()
+    if not running or yes:
+        return True
+    for jid, kind, params in running:
+        what = ", ".join(params.get("tickers") or []) if kind == "analysis" else params.get("request", "")
+        console.print(f"[yellow]Job {jid} ({kind}: {what}) is running; restarting the service stops it "
+                      f"(it is marked failed and can be run again).[/yellow]")
+    return typer.confirm("Restart anyway?", default=False)
+
+
+@service_app.command("remove")
+def service_remove(yes: bool = typer.Option(False, "--yes", "-y", help="Stop even if an analysis is running")):
+    """Stop the service and stop it starting at sign-in."""
+    if not _on_windows():
+        console.print("Not Windows: nothing to remove.")
+        return
+    if not _confirm_interrupt(yes):
+        raise typer.Exit(code=1)
+    launcher = _startup_launcher()
+    if launcher.exists():
+        launcher.unlink()
+        console.print(f"Removed {launcher}")
+    code, _ = _schtasks("/Query", "/TN", SERVER_TASK)       # an older install used a scheduled task
+    if code == 0:
+        _schtasks("/Delete", "/F", "/TN", SERVER_TASK)
+    _stop_service_processes()
+    console.print("[green]The service is stopped and will not start at sign-in.[/green]")
+
+
+def _stop_service_processes() -> None:
+    """End the hidden PowerShell loop and the server it started."""
+    import subprocess
+
+    # The loop, the server, and any analysis the server started (`python -m cli.main daily`;
+    # a `tradingagents daily` you run yourself is left alone).
+    script = ("Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'run_server.ps1' -or "
+              "$_.CommandLine -match 'tradingagents.*server run' -or $_.CommandLine -match '-m cli.main daily' } | "
+              "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }")
+    subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True, text=True)
+
+
+@service_app.command("status")
+def service_status(port: int = typer.Option(8000, "--port")):
+    """Is it set to start at sign-in, and does the service answer?"""
+    import urllib.request
+
+    if _on_windows():
+        launcher = _startup_launcher()
+        if launcher.exists():
+            console.print(f"Starts at sign-in: yes ({launcher})")
+        else:
+            console.print("[yellow]Starts at sign-in: no (install with `tradingagents server service install`)[/yellow]")
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=3) as resp:
+            console.print(f"[green]The service answers on port {port}.[/green] {resp.read().decode()[:80]}")
+    except Exception as exc:
+        console.print(f"[yellow]Nothing answers on port {port}: {exc}[/yellow]")
+
+
+@server_app.command("firewall")
+def server_firewall(
+    port: int = typer.Option(8000, "--port"),
+    lan: bool = typer.Option(True, "--lan/--no-lan", help="Also allow the home network, not only Tailscale"),
+):
+    """Open the port in Windows Firewall for Tailscale (and the home network). Needs an administrator window."""
+    import subprocess
+
+    remote = "100.64.0.0/10" + (",LocalSubnet" if lan else "")
+    args = ["netsh", "advfirewall", "firewall", "add", "rule", "name=TradingAgents web service", "dir=in",
+            "action=allow", "protocol=TCP", f"localport={port}", f"remoteip={remote}", "profile=any"]
+    if not _on_windows():
+        console.print("Not Windows: allow the port in your firewall for 100.64.0.0/10 (Tailscale) and your LAN.")
+        return
+    subprocess.run(["netsh", "advfirewall", "firewall", "delete", "rule", "name=TradingAgents web service"],
+                   capture_output=True, text=True)
+    done = subprocess.run(args, capture_output=True, text=True)
+    if done.returncode != 0:
+        console.print("[yellow]Windows refused (this needs administrator rights). Open PowerShell with "
+                      "\"Run as administrator\" and run:[/yellow]")
+        console.print("  " + " ".join(a if " " not in a else f'"{a}"' for a in args))
+        raise typer.Exit(code=1)
+    console.print(f"[green]Firewall opened[/green] for port {port}: Tailscale"
+                  f"{' and the home network' if lan else ''} only.")
+
+
+@server_app.command("backup")
+def server_backup():
+    """Copy the database now (the running service also does this every night at 03:00, keeping 14)."""
+    from server.backup import backup
+
+    try:
+        path = backup()
+    except Exception as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+    console.print(f"[green]Backed up[/green] to {path}")
 
 
 @server_app.command("users")

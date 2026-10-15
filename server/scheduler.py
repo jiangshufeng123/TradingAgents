@@ -65,6 +65,15 @@ class DailyScheduler:
         self.reload()
         self.scheduler.start()
 
+    @staticmethod
+    def _backup() -> None:
+        from server.backup import backup
+
+        try:
+            logger.info("database backup: %s", backup())
+        except Exception as exc:          # a PostgreSQL database, or a full disk: say so, keep running
+            logger.warning("database backup skipped: %s", exc)
+
     def stop(self) -> None:
         if self.scheduler.running:
             self.scheduler.shutdown(wait=False)
@@ -74,6 +83,8 @@ class DailyScheduler:
 
         for job in self.scheduler.get_jobs():
             job.remove()
+        self.scheduler.add_job(self._backup, CronTrigger(hour=3, minute=0, timezone=self.timezone),
+                               id="backup", replace_existing=True, misfire_grace_time=6 * 3600, coalesce=True)
         with db.session() as s:
             rows = list(s.execute(select(Schedule, User).join(User, User.id == Schedule.user_id)
                                   .where(Schedule.enabled.is_(True), User.is_active.is_(True))))

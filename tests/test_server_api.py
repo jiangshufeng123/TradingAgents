@@ -212,7 +212,8 @@ def test_analysis_runner_pieces(env, tmp_path):
     assert e["TRADINGAGENTS_REPORTS_DIR"].replace("\\", "/").endswith("reports/users/amy")
     assert e["TRADINGAGENTS_PAPER_DIR"].replace("\\", "/").endswith("paper/users/2")
     log = "─ 1/3 NVDA 2026-10-15 ─\n...\n─ 2/3 600519.SS 2026-10-15 ─\n"
-    assert runner.progress(log) == {"index": 2, "total": 3, "ticker": "600519.SS"}
+    p = runner.progress(log)
+    assert (p["index"], p["total"], p["ticker"]) == (2, 3, "600519.SS") and p["fraction"] == pytest.approx(1 / 3, abs=1e-3)
     path = tmp_path / "ledger.csv"
     _ledger(path, [{"run_time": "2026-10-15 09:00:00", "ticker": "A"}, {"run_time": "2026-10-15 10:00:00", "ticker": "B"}])
     assert [r["ticker"] for r in runner.ledger_rows(path, since=datetime(2026, 10, 15, 9, 30))] == ["B"]
@@ -328,3 +329,68 @@ def test_overview_and_datasources(app):
     assert _client(app, "amy", "user-pass-1").post("/api/datasources/reset", headers=H).status_code == 403
     with db.session() as s:
         assert s.get(Schedule, 1) is not None
+
+
+@pytest.mark.unit
+def test_pages_are_served_with_the_api(app):
+    with TestClient(app) as c:
+        page = c.get("/")
+        assert page.status_code == 200 and "TradingAgents 投研台" in page.text and "app.js" in page.text
+        assert c.get("/app.js").status_code == 200 and c.get("/vendor/vue-3.5.13.global.prod.js").status_code == 200
+        assert c.get("/api/health").json()["ok"]                 # the API still wins over the pages
+        assert c.get("/api/me").status_code == 401
+
+
+@pytest.mark.unit
+def test_overview_decisions_one_per_listing_newest_first(app, env):
+    ian, amy = _client(app), _client(app, "amy", "user-pass-1")
+    with db.session() as s:
+        ian_user, amy_user = s.get(User, 1), s.get(User, 2)
+    report = runner.user_reports_dir(env, ian_user) / "NVDA" / "2026-10-15_1640"
+    report.mkdir(parents=True)
+    (report / "complete_report.html").write_text("<h1>NVDA</h1>", encoding="utf-8")
+    # the pre-web ledger (imported history) and this user's own ledger
+    _ledger(runner.reports_base(env) / "cost_ledger.csv", [
+        {"run_time": "2026-10-09 18:40:00", "ticker": "NVDA", "rating": "Buy"},
+        {"run_time": "2026-10-14 18:41:00", "ticker": "603980.SS", "rating": "Underweight", "action": "cut the position by half"},
+        {"run_time": "2026-10-14 18:50:00", "ticker": "NVDA", "rating": "Overweight"}])
+    _ledger(runner.user_reports_dir(env, ian_user) / "cost_ledger.csv", [
+        {"run_time": "2026-10-15 16:40:00", "ticker": "NVDA", "rating": "Underweight", "action": "SELL 100",
+         "target_weight": "0.03", "stop": "171.2", "report_dir": str(report)},
+        {"run_time": "2026-10-15 16:45:00", "ticker": "603980.SH", "rating": "Hold"}])
+    with db.session() as s:
+        j = jobs.create(s, 1, "analysis", {"tickers": ["NVDA"]})
+        jobs.finish(s, j, {"runs": [{"ticker": "NVDA", "run_time": "2026-10-15 16:40:00", "report_dir": str(report)}]})
+        jid = j.id
+    d = ian.get("/api/overview").json()["decisions"]
+    assert [x["ticker"] for x in d] == ["603980.SH", "NVDA"]               # one per listing, newest first
+    nvda = d[1]
+    assert nvda["rating"] == "Underweight" and nvda["action"] == "SELL 100" and nvda["target_weight"] == 0.03
+    assert (nvda["job_id"], nvda["index"]) == (jid, 0) and d[0]["job_id"] is None
+    assert "NVDA" in ian.get("/api/report", params={"dir": str(report)}).text
+    assert ian.get("/api/report", params={"dir": "/etc"}).status_code == 404
+    assert amy.get("/api/overview").json()["decisions"] == []               # not the administrator's history
+    assert amy.get("/api/report", params={"dir": str(report)}).status_code == 404
+    assert ian.get("/api/paper").json()["exists"] is False
+
+
+@pytest.mark.unit
+def test_paper_account_opened_and_switched_from_the_page(app, env):
+    ian = _client(app)
+    assert ian.get("/api/paper").json() == {"exists": False, "orders_on": False, "benchmark": env.get("paper_benchmark") or "",
+                                            "currency": env.get("paper_currency") or "CNY"}
+    with db.session() as s:
+        user = s.get(User, 1)
+    assert runner.analysis_env(env, user)["TRADINGAGENTS_PAPER_TRADING"] == "false"     # no account: no orders
+    assert ian.put("/api/paper/switch", json={"enabled": True}, headers=H).status_code == 409
+    r = ian.post("/api/paper/open", json={"cash": 500000, "currency": "HKD"}, headers=H).json()
+    assert r["exists"] and r["orders_on"] and r["currency"] == "HKD" and r["start_cash"] == 500000
+    assert runner.analysis_env(env, user)["TRADINGAGENTS_PAPER_TRADING"] == "true"
+    assert ian.post("/api/paper/open", json={"cash": 1}, headers=H).status_code == 409          # already open
+    assert ian.put("/api/paper/switch", json={"enabled": False}, headers=H).json() == {"orders_on": False}
+    assert runner.analysis_env(env, user)["TRADINGAGENTS_PAPER_TRADING"] == "false"
+    r = ian.post("/api/paper/open", json={"cash": 2000000, "currency": "CNY", "restart": True}, headers=H).json()
+    assert r["start_cash"] == 2000000 and r["orders_on"] is True                                  # a fresh start is on
+    assert ian.post("/api/paper/open", json={"cash": -5}, headers=H).status_code == 422
+    amy = _client(app, "amy", "user-pass-1")
+    assert amy.get("/api/paper").json()["exists"] is False                                       # per user

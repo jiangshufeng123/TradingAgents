@@ -150,3 +150,17 @@ def _fresh_data_gateway(monkeypatch):
     datagw.reset(clear_health=True)
     yield
     datagw.reset(clear_health=True)
+
+
+@pytest.fixture(autouse=True)
+def _no_security_name_downloads(monkeypatch, tmp_path):
+    """Names are looked up from Tushare, HKEX and Yahoo; tests that want names supply them.
+    Each test keeps its own names cache file."""
+    from tradingagents import names
+
+    names.reset()
+    monkeypatch.setattr(names, "_cache_path", lambda: tmp_path / "names.json")
+    monkeypatch.setattr(names, "_LOADERS", {"cn": lambda: {}, "hk": lambda: {}})
+    monkeypatch.setattr(names, "_us_name", lambda symbol: None)
+    yield
+    names.reset()

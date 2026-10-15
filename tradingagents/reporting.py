@@ -17,9 +17,19 @@ def analyst_names(keys) -> list[str]:
     return ["sentiment" if key == "social" else key for key in keys or []]
 
 
+def _titled(ticker: str) -> str:
+    """'600519.SS 贵州茅台' when the name is known (names never block a report)."""
+    try:
+        from tradingagents.names import label
+
+        return label(ticker)
+    except Exception:
+        return ticker
+
+
 def _header(ticker: str, final_state: dict, settings: dict | None) -> str:
     """The report's title and what produced it: analysis date, version, models, analysts, vendors."""
-    lines = [f"# Trading Analysis Report: {ticker}", ""]
+    lines = [f"# Trading Analysis Report: {_titled(ticker)}", ""]
     if final_state.get("trade_date"):
         lines.append(f"- Analysis date: {final_state['trade_date']}")
     if final_state.get("final_trade_decision"):

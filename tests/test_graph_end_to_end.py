@@ -391,3 +391,25 @@ def test_the_memory_step_reads_lessons_as_of_the_trade_date_and_settles_once(tmp
 
     assert asked == ["2026-01-20", "2026-01-20"]
     assert (tmp_path / "log.md").read_text() == log_after_first
+
+
+@pytest.mark.unit
+def test_a_streamed_run_prints_plain_progress_for_every_main_step(tmp_path, monkeypatch, offline):
+    import io
+
+    from cli.progress import PlainProgress
+
+    graph = _graph(tmp_path, monkeypatch, ScriptedModel(), research_styles="off")
+    out = io.StringIO()
+    progress = PlainProgress([spec for spec in ("Market Analyst", "Sentiment Analyst", "News Analyst",
+                                                "Fundamentals Analyst")], out=out)
+    progress.new_run(1, 1)
+    args = graph.propagator.get_graph_args(callbacks=[progress])
+    for _ in graph.stream_run(graph.create_run_state("NVDA", TRADE_DATE), **args):
+        pass
+    text = out.getvalue()
+    for step in ("市场分析师", "舆情分析师", "新闻分析师", "基本面分析师", "多头研究员", "空头研究员",
+                 "研究经理", "交易员", "激进派风控", "保守派风控", "中立派风控", "组合经理"):
+        assert f"{step} 完成" in text, step
+    assert "[进度 12/12]" in text.strip().splitlines()[-1]
+    assert "[工具]" in text
