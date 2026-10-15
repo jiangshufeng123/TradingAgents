@@ -654,38 +654,47 @@ def _bars(df: pd.DataFrame, cols: dict, volume_scale: float = 1.0) -> pd.DataFra
     return out.dropna(subset=["Date", "Close"])
 
 
-def daily_bars(ticker: str, start: pd.Timestamp, end: pd.Timestamp) -> tuple[pd.DataFrame, str]:
-    """Unadjusted daily bars ``Date/Open/High/Low/Close/Volume`` (shares) in [start, end].
-
-    Only sessions that have closed are returned. A-shares try East Money, then
-    Sina; Hong Kong uses Sina. Returns (frame, source); an empty frame when no
-    source answered.
-    """
+def bars_from(source: str, ticker: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+    """Unadjusted bars of closed sessions in [start, end] from one AkShare source
+    ("East Money": A-shares; "Sina": A-shares and HK). Empty when it has none."""
     market, code = _require(ticker)
     s, e = start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
     en = {"日期": "Date", "开盘": "Open", "最高": "High", "最低": "Low", "收盘": "Close", "成交量": "Volume"}
     lower = {"date": "Date", "open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume"}
-    if market == "hk":
-        attempts = [("Sina", "stock_hk_daily", {"symbol": code, "adjust": ""}, lower, 1.0)]
+    if source == "East Money":
+        if market == "hk":
+            raise NoMarketDataError(ticker, ticker, "East Money bars are served for A-shares only")
+        # East Money reports volume in lots of 100 shares.
+        bars = _bars(call("stock_zh_a_hist", symbol=code, period="daily", start_date=s, end_date=e,
+                          adjust=""), en, 100.0)
+    elif market == "hk":
+        bars = _bars(call("stock_hk_daily", symbol=code, adjust=""), lower)
     else:
-        attempts = [
-            # East Money reports volume in lots of 100 shares.
-            ("East Money", "stock_zh_a_hist",
-             {"symbol": code, "period": "daily", "start_date": s, "end_date": e, "adjust": ""}, en, 100.0),
-            ("Sina", "stock_zh_a_daily",
-             {"symbol": f"{market}{code}", "start_date": s, "end_date": e, "adjust": ""}, lower, 1.0),
-        ]
-    for source, func, kwargs, cols, scale in attempts:
-        try:
-            bars = _bars(call(func, **kwargs), cols, scale)
-        except Exception as exc:   # any source failing just means trying the next
-            logger.debug("%s daily bars from %s failed: %s", ticker, source, exc)
-            continue
-        bars = bars[(bars["Date"] >= start.normalize()) & (bars["Date"] <= end.normalize())]
-        bars = bars[[_session_over(market, d) for d in bars["Date"]]]
-        if not bars.empty:
-            return bars.reset_index(drop=True), source
-    return pd.DataFrame(), ""
+        bars = _bars(call("stock_zh_a_daily", symbol=f"{market}{code}", start_date=s, end_date=e,
+                          adjust=""), lower)
+    if bars.empty:
+        return bars
+    bars = bars[(bars["Date"] >= start.normalize()) & (bars["Date"] <= end.normalize())]
+    bars = bars[[_session_over(market, d) for d in bars["Date"]]]
+    return bars.reset_index(drop=True)
+
+
+def daily_bars(ticker: str, start: pd.Timestamp, end: pd.Timestamp) -> tuple[pd.DataFrame, str]:
+    """Unadjusted daily bars ``Date/Open/High/Low/Close/Volume`` (shares) in [start, end].
+
+    Only sessions that have closed are returned. Served by the data gateway
+    (Tushare, then East Money, then Sina, each checked for sane prices).
+    Returns (frame, source); an empty frame when no source answered.
+    """
+    from tradingagents.datagw import GatewayNoDataError, GatewayUnavailableError, gateway
+
+    _require(ticker)
+    try:
+        result = gateway().fetch("daily_bars", ticker=ticker, start=pd.Timestamp(start), end=pd.Timestamp(end))
+    except (GatewayNoDataError, GatewayUnavailableError) as exc:
+        logger.debug("%s daily bars: %s", ticker, exc)
+        return pd.DataFrame(), ""
+    return result.data, result.source
 
 
 # --- Hong Kong board lots ------------------------------------------------------
@@ -808,25 +817,47 @@ def lhb_lines(ticker: str, end_date: str, sessions: int = 20) -> list[str]:
         start = days[-sessions] if len(days) >= sessions else end - timedelta(days=45)
     except Exception:
         start = end - timedelta(days=45)
-    df = call("stock_lhb_detail_em", start_date=f"{start:%Y%m%d}", end_date=f"{end:%Y%m%d}")
-    header = f"## 龙虎榜 (Dragon-Tiger list) from {start:%Y-%m-%d} to {end:%Y-%m-%d}"
-    if df.empty or "代码" not in df.columns:
+    from tradingagents.datagw import gateway
+
+    result = gateway().fetch("lhb", ticker=ticker, start=start, end=end)
+    df = result.data
+    header = f"## 龙虎榜 (Dragon-Tiger list) from {start:%Y-%m-%d} to {end:%Y-%m-%d} [{result.source}]"
+    if df is None or df.empty:
         return [header, "- not listed"]
-    df = df[df["代码"].astype(str).str.zfill(6) == found[1]].copy()
-    df["_d"] = pd.to_datetime(df["上榜日"], errors="coerce")
-    df = df[df["_d"] <= end].sort_values("_d")
+    df = df[pd.to_datetime(df["date"]) <= end].assign(date=lambda d: pd.to_datetime(d["date"])).sort_values("date")
     if df.empty:
         return [header, "- not listed"]
-    rows = [[f"{r['_d']:%Y-%m-%d}", str(r.get("上榜原因") or "")[:40], _fmt(r.get("涨跌幅")),
-             _yi(r.get("龙虎榜净买额")), _fmt(r.get("净买额占总成交比")), _fmt(r.get("换手率"))]
+    rows = [[f"{r['date']:%Y-%m-%d}", str(r.get("reason") or "")[:40], _fmt(r.get("chg_pct")),
+             _yi(r.get("net_buy")), _fmt(r.get("net_pct")), _fmt(r.get("turnover"))]
             for _, r in df.iterrows()]
-    net = pd.to_numeric(df["龙虎榜净买额"], errors="coerce").sum()
+    net = pd.to_numeric(df["net_buy"], errors="coerce").sum()
     return [header,
             _table(["Date", "Reason", "Chg %", "Net buy (亿)", "Net % of turnover", "Turnover %"], rows),
             f"Net buying by listed seats over the window: {_yi(net)} 亿元 across {len(df)} listing(s)."]
 
 
-def _margin_row(market: str, code: str, day: pd.Timestamp) -> dict | None:
+def lhb_em(ticker: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+    """East Money's 龙虎榜 rows for the listing, in the gateway's columns."""
+    found = _a_share(ticker)
+    if found is None:
+        raise NoMarketDataError(ticker, ticker, "龙虎榜 is A-share only")
+    df = call("stock_lhb_detail_em", start_date=f"{start:%Y%m%d}", end_date=f"{end:%Y%m%d}")
+    cols = ["date", "reason", "chg_pct", "net_buy", "net_pct", "turnover"]
+    if df.empty or "代码" not in df.columns:
+        return pd.DataFrame(columns=cols)
+    df = df[df["代码"].astype(str).str.zfill(6) == found[1]]
+    # "上榜后N日" returns look past the listing day and are never carried.
+    return pd.DataFrame({
+        "date": pd.to_datetime(df["上榜日"], errors="coerce"), "reason": df["上榜原因"],
+        "chg_pct": pd.to_numeric(df["涨跌幅"], errors="coerce"),
+        "net_buy": pd.to_numeric(df["龙虎榜净买额"], errors="coerce"),
+        "net_pct": pd.to_numeric(df["净买额占总成交比"], errors="coerce"),
+        "turnover": pd.to_numeric(df["换手率"], errors="coerce"),
+    }).dropna(subset=["date"]).reset_index(drop=True)
+
+
+def margin_from_exchange(market: str, code: str, day: pd.Timestamp) -> dict | None:
+    """One day's margin row from the exchange's own table (SSE or SZSE, via AkShare)."""
     if market == "sh":
         df = call("stock_margin_detail_sse", date=f"{day:%Y%m%d}")
         key, buy, bal, short = "标的证券代码", "融资买入额", "融资余额", "融券余量"
@@ -842,21 +873,26 @@ def _margin_row(market: str, code: str, day: pd.Timestamp) -> dict | None:
     return {"date": day, "balance": _num(row.get(bal)), "buy": _num(row.get(buy)), "short": _num(row.get(short))}
 
 
+def _margin_row(ticker: str, day: pd.Timestamp) -> dict | None:
+    from tradingagents.datagw import gateway
+
+    return gateway().fetch("margin", ticker=ticker, day=day).data
+
+
 def margin_lines(ticker: str, end_date: str, lookback: int = 5) -> list[str]:
     """Margin financing for the listing: the latest published day before ``end_date``
     (exchanges publish day T on T+1) against ``lookback`` sessions earlier."""
     found = _a_share(ticker)
     if found is None:
         return []
-    market, code = found
     days = [d for d in _sessions(ticker, end_date) if d < pd.Timestamp(end_date).normalize()]
     if len(days) <= lookback:
         return []
-    latest = _margin_row(market, code, days[-1])
+    latest = _margin_row(ticker, days[-1])
     header = "## 融资融券 (margin trading)"
-    if latest is None:
+    if not latest:
         return [header, f"- {ticker} is not a margin-trading underlying, or no data for {days[-1]:%Y-%m-%d}"]
-    earlier = _margin_row(market, code, days[-1 - lookback])
+    earlier = _margin_row(ticker, days[-1 - lookback])
     line = f"- {latest['date']:%Y-%m-%d}: financing balance {_yi(latest['balance'])} 亿元"
     if earlier and earlier["balance"] and latest["balance"] is not None:
         change = latest["balance"] / earlier["balance"] - 1

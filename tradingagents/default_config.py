@@ -54,6 +54,11 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_PAPER_BENCHMARK":      "paper_benchmark",
     "TRADINGAGENTS_DAILY_SCREEN":         "daily_screen",
     "TRADINGAGENTS_DAILY_SCREEN_TOP":     "daily_screen_top",
+    # Data gateway: source order per capability ("daily_bars=sina,tushare;cn_spot=tushare"),
+    # and when a failing source is skipped (failures in a row, then seconds skipped).
+    "TRADINGAGENTS_GATEWAY_ORDER":        "gateway_order",
+    "TRADINGAGENTS_GATEWAY_BREAKER_FAILURES": "gateway_breaker_failures",
+    "TRADINGAGENTS_GATEWAY_BREAKER_SECONDS":  "gateway_breaker_seconds",
     "TRADINGAGENTS_BELIEF_UPDATE_EVERY":  "belief_update_every",
     "TRADINGAGENTS_MODEL_PRICES":         "model_prices",
     "TRADINGAGENTS_PRICE_CURRENCY":       "price_currency",
@@ -231,6 +236,10 @@ def build_default_config() -> dict:
         # nothing joins the watchlist until you pick it (`tradingagents watchlist pick`).
         "daily_screen": None,            # e.g. "低估值、ROE高于15%的大盘股"
         "daily_screen_top": 20,          # candidates kept
+        # Data gateway (tradingagents/datagw): "" keeps the built-in source order.
+        "gateway_order": "",
+        "gateway_breaker_failures": 3,
+        "gateway_breaker_seconds": 600,
         "belief_update_every": 5,
         # Checkpoint/resume: when True, LangGraph saves state after each node
         # so a crashed run can resume from the last successful step.

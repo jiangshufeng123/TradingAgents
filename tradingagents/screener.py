@@ -198,19 +198,18 @@ def results_paged(period: str, cache: Path, pause: float = 1.0, timeout: float =
 
 
 def _spot(config: dict, max_age: float) -> tuple[pd.DataFrame, str]:
-    """Today's quotes: East Money, else Sina (cached for ``max_age`` seconds)."""
-    from tradingagents.dataflows.vendors.akshare_cn import call
+    """Every A-share's quote, from the data gateway (Tushare, East Money, Sina;
+    a good answer is reused for ``max_age`` seconds). Returns (frame, source)."""
+    from tradingagents.datagw import GatewayNoDataError, GatewayUnavailableError, gateway
 
-    cache = _cache_dir(config)
-    for source, fetch in (("East Money", lambda: call("stock_zh_a_spot_em", _retries=1)), ("Sina", spot_sina)):
-        path = cache / f"spot_{source.replace(' ', '').lower()}_{date.today():%Y%m%d}.csv"
-        try:
-            df = _cached(path, max_age, fetch)
-            if df is not None and not df.empty:
-                return df, source
-        except Exception as exc:
-            logger.warning("A-share quotes from %s failed: %s", source, exc)
-    raise RuntimeError("no A-share quote source answered (East Money, Sina)")
+    try:
+        result = gateway().fetch("cn_spot", ttl=max_age, cache_dir=config.get("data_cache_dir"),
+                                 day=f"{date.today():%Y-%m-%d}")
+    except (GatewayNoDataError, GatewayUnavailableError) as exc:
+        raise RuntimeError(f"no A-share quote source answered ({exc})") from exc
+    df, source = result.data, result.source
+    as_of = df.attrs.get("as_of")
+    return df, f"{source} ({as_of} close)" if as_of else source
 
 
 def build_universe(config: dict, spot_max_age: float = 3600) -> tuple[pd.DataFrame, str]:
@@ -263,8 +262,9 @@ def build_universe(config: dict, spot_max_age: float = 3600) -> tuple[pd.DataFra
     for name in FIELDS:              # a field today's sources lack is empty: it matches nothing
         if name not in df.columns:
             df[name] = float("nan")
-    if "industry" not in df.columns:
-        df["industry"] = None
+    if "industry" not in df.columns or df["industry"].isna().all():
+        # without quarterly results, the quote source's own industry (Tushare's) if it has one
+        df["industry"] = spot["行业"].values if "行业" in spot.columns else None
     df["ticker"] = df["code"].map(yahoo_symbol)
     df["st"] = df["name"].astype(str).str.upper().str.contains("ST")
     df.attrs["source"] = source

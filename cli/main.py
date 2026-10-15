@@ -305,7 +305,20 @@ def daily(
             console.print(f"[yellow]Paper account summary failed: {exc}[/yellow]")
     for ticker, reason in failed:
         console.print(f"[yellow]failed:[/yellow] {ticker}: {reason}")
+    _print_balance()
     console.print("Decisions are in the memory log; run [bold]tradingagents scoreboard[/bold] once they have settled.")
+
+
+def _print_balance() -> None:
+    """The model account's remaining balance, when the provider publishes one (never fails a run)."""
+    try:
+        from tradingagents import llm_balance
+
+        provider = (DEFAULT_CONFIG.get("quick_think_provider") or DEFAULT_CONFIG.get("llm_provider") or "").lower()
+        if llm_balance.supported(provider):
+            console.print(llm_balance.summary_line(llm_balance.balance(provider, max_age=0)))
+    except Exception:
+        pass
 
 
 @app.command()
@@ -552,6 +565,174 @@ def watchlist_pick(
     console.print(f"[dim]{path}[/dim]\n")
     console.print(screener.render(result, screener.Spec(), "saved"))
     _pick_into_watchlist(result, note=f"screen {path.stem[7:]}", rows=add)
+
+
+server_app = typer.Typer(help="The system service: database, accounts, and (soon) the web API.")
+app.add_typer(server_app, name="server")
+
+
+@server_app.command("init")
+def server_init(
+    admin: str = typer.Option(..., "--admin", help="Administrator username"),
+    import_files: bool = typer.Option(True, "--import/--no-import",
+                                      help="Bring this computer's watchlist, portfolio, paper account and "
+                                           "cost ledger into the administrator's account"),
+):
+    """Create the database and the administrator account (asks for the password)."""
+    from server import db
+    from server.importer import import_all
+    from server.services import users
+
+    db.init_db()
+    password = typer.prompt("Administrator password (at least 8 characters)", hide_input=True,
+                            confirmation_prompt=True)
+    with db.session() as s:
+        if users.by_name(s, admin):
+            console.print(f"[yellow]User {admin!r} already exists; nothing created.[/yellow]")
+            raise typer.Exit(code=1)
+        user = users.create_user(s, admin, password, role="admin")
+        summary = import_all(s, user.id, DEFAULT_CONFIG) if import_files else {}
+    console.print(f"[green]Database ready:[/green] {db.default_url()}")
+    console.print(f"[green]Administrator:[/green] {admin}")
+    if summary:
+        console.print(f"Imported: watchlist {len(summary['watchlist'])}, holdings {summary['holdings']}, "
+                      f"cost entries {summary['costs']}, paper account {'yes' if summary['paper'] else 'no'}")
+
+
+@server_app.command("adduser")
+def server_adduser(
+    username: str = typer.Argument(..., help="New username"),
+    admin: bool = typer.Option(False, "--admin", help="Give administrator rights"),
+    quota: float = typer.Option(None, "--quota", help="Monthly model spending cap (price currency); omit for none"),
+):
+    """Add an account (asks for its password)."""
+    from server import db
+    from server.services import users
+
+    db.init_db()
+    password = typer.prompt("Password (at least 8 characters)", hide_input=True, confirmation_prompt=True)
+    with db.session() as s:
+        user = users.create_user(s, username, password, role="admin" if admin else "user")
+        user.monthly_quota = quota
+    console.print(f"[green]Created[/green] {username} ({'admin' if admin else 'user'})")
+
+
+@server_app.command("users")
+def server_users():
+    """List the accounts."""
+    from sqlalchemy import select
+
+    from server import db
+    from server.models import User
+    from server.services import costs
+
+    db.init_db()
+    with db.session() as s:
+        for u in s.scalars(select(User).order_by(User.id)):
+            quota = "no cap" if u.monthly_quota is None else f"cap {u.monthly_quota:,.2f}"
+            console.print(f"  {u.id:>3}  {u.username:<16} {u.role:<6} {'active' if u.is_active else 'disabled':<8} "
+                          f"this month {costs.month_spend(s, u.id):,.2f} ({quota})")
+
+
+data_app = typer.Typer(help="The data gateway: which sources serve A-share/HK data, and how they are doing.")
+app.add_typer(data_app, name="datasource")
+
+_STATE_STYLE = {"ok": "green", "unused": "dim", "failing": "yellow", "circuit open": "red",
+                "not configured": "dim", "empty": "cyan", "bad data": "red", "failed": "red"}
+
+
+def _ago(stamp) -> str:
+    import time as _time
+
+    if not stamp:
+        return "-"
+    secs = _time.time() - stamp
+    if secs < 120:
+        return f"{secs:.0f}s ago"
+    if secs < 7200:
+        return f"{secs / 60:.0f}m ago"
+    if secs < 172800:
+        return f"{secs / 3600:.0f}h ago"
+    return f"{secs / 86400:.0f}d ago"
+
+
+@data_app.command("status")
+def datasource_status():
+    """Each capability's sources in priority order, with their record and circuit state."""
+    from rich.table import Table
+
+    from tradingagents.datagw import gateway
+
+    table = Table(show_lines=False)
+    for col in ("Data", "#", "Source", "State", "OK", "Fail", "Last OK", "Latency", "Last error / note"):
+        table.add_column(col)
+    for r in gateway(DEFAULT_CONFIG).status():
+        style = _STATE_STYLE.get(r["state"], "")
+        note = r["note"] or (r["last_error"] or "" if r["state"] != "ok" else "")
+        if r["open_until"]:
+            import time as _time
+
+            note = f"skipped for {(r['open_until'] - _time.time()) / 60:.0f} more min; " + note
+        table.add_row(r["title"], str(r["rank"]), r["label"], f"[{style}]{r['state']}[/{style}]",
+                      str(r["ok"]), str(r["fail"]), _ago(r["last_ok"]),
+                      f"{r['latency_ms']} ms" if r["latency_ms"] is not None else "-", note[:70])
+    console.print(table)
+
+
+@data_app.command("check")
+def datasource_check(
+    ticker: str = typer.Option("600519.SS", "--ticker", help="A-share used for the checks"),
+    hk: str = typer.Option("0700.HK", "--hk", help="Hong Kong listing used for the bar check"),
+    spot: bool = typer.Option(False, "--spot", help="Also download the whole-market quote table from each "
+                                                    "source (slow: Sina takes about a minute)"),
+):
+    """Ask every source for a small sample now and show which answer (no model is called)."""
+    from datetime import date, timedelta
+
+    import pandas as pd
+
+    from tradingagents.datagw import gateway
+
+    gw = gateway(DEFAULT_CONFIG)
+    end = pd.Timestamp(date.today())
+    probes = [
+        ("daily_bars", {"ticker": ticker, "start": end - timedelta(days=14), "end": end}, ticker),
+        ("daily_bars", {"ticker": hk, "start": end - timedelta(days=14), "end": end}, hk),
+        ("lhb", {"ticker": ticker, "start": end - timedelta(days=10), "end": end}, ticker),
+        ("margin", {"ticker": ticker, "day": end - timedelta(days=1 if end.weekday() else 3)}, ticker),
+    ]
+    if spot:
+        probes.append(("cn_spot", {"day": f"{end:%Y-%m-%d}"}, "all A-shares"))
+    for cap_name, kwargs, what in probes:
+        cap = gw.capabilities[cap_name]
+        console.print(f"[bold]{cap.title}[/bold] ({what})")
+        for p in gw.providers(cap_name):
+            state, detail, took = gw.probe(cap_name, p.name, **kwargs)
+            style = _STATE_STYLE.get(state, "")
+            console.print(f"  {p.label:<12} [{style}]{state:<15}[/{style}] {took:5.1f}s  {detail[:90]}")
+    if not spot:
+        console.print("[dim]Whole-market quotes not checked; add --spot to include them.[/dim]")
+
+
+@data_app.command("reset")
+def datasource_reset():
+    """Clear every source's record and close all circuits (after fixing a network problem)."""
+    from tradingagents.datagw import gateway
+
+    gateway(DEFAULT_CONFIG).health.reset()
+    console.print("[green]Source records cleared; every source will be tried again.[/green]")
+
+
+@app.command()
+def balance():
+    """The model provider's remaining account balance (DeepSeek), read with the key in .env."""
+    from tradingagents import llm_balance
+
+    provider = (DEFAULT_CONFIG.get("quick_think_provider") or DEFAULT_CONFIG.get("llm_provider") or "").lower()
+    if not llm_balance.supported(provider):
+        provider = "deepseek"
+    info = llm_balance.balance(provider, max_age=0)
+    console.print(llm_balance.summary_line(info), style="green" if info.get("ok") else "yellow")
 
 
 paper_app = typer.Typer(help="The paper-trading account: simulated fills of the system's calls.")

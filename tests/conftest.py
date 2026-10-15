@@ -133,3 +133,20 @@ def _isolate_config():
     config_module._config = copy.deepcopy(default_config.DEFAULT_CONFIG)
     yield
     config_module._config = copy.deepcopy(default_config.DEFAULT_CONFIG)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_data_gateway(monkeypatch):
+    """Each test starts with closed circuits, no Tushare token, and accepts small quote tables.
+
+    The gateway remembers failures (to skip a source that keeps failing); one
+    test's mocked outage must not skip that source in the next test.
+    """
+    from tradingagents import datagw
+    from tradingagents.datagw import quality
+
+    monkeypatch.setenv("TUSHARE_TOKEN", "")
+    monkeypatch.setattr(quality, "MIN_A_SHARES", 1)
+    datagw.reset(clear_health=True)
+    yield
+    datagw.reset(clear_health=True)
