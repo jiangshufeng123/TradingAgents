@@ -85,3 +85,12 @@ def test_background_runs_get_unbuffered_plain_progress(tmp_path, monkeypatch):
         user = users.create_user(s, "ian", "admin-pass-1", role="admin")
     env = runner.analysis_env({"reports_dir": str(tmp_path / "r"), "results_dir": str(tmp_path / "x")}, user)
     assert env["PYTHONUNBUFFERED"] == "1" and env["TRADINGAGENTS_PLAIN_PROGRESS"] == "1"
+
+
+def test_without_an_output_stream_it_writes_to_standard_output(capsys):
+    """The CLI makes it with no stream (as `daily` does): lines go to standard output."""
+    from cli.progress import PlainProgress
+
+    p = PlainProgress(["Market Analyst"])
+    p._print("[运行] 开始分析")
+    assert "[运行] 开始分析" in capsys.readouterr().out

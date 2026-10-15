@@ -257,6 +257,13 @@ def test_analysis_runner_end_to_end_with_a_stand_in_batch(env, monkeypatch, tmp_
     assert result["exit_code"] == 1 and "1/2 NVDA" in runner.job_log(job.id).read_text(encoding="utf-8")
     assert not runner.procs.pid_file(runner.job_log(job.id).with_suffix("")).exists()
 
+    # Every ticker failed (the batch still exits 0): the job fails rather than finishing empty.
+    nothing = tmp_path / "nothing.py"
+    nothing.write_text("print('600668.SS failed: boom')\n", encoding="utf-8")
+    monkeypatch.setattr(runner, "analysis_command", lambda params, pf: [sys.executable, str(nothing)])
+    with pytest.raises(RuntimeError, match="no ticker produced a result"):
+        runner.run_analysis(job, user, env, lambda: False, poll=0.05)
+
     slow = tmp_path / "slow.py"
     slow.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
     monkeypatch.setattr(runner, "analysis_command", lambda params, pf: [sys.executable, str(slow)])

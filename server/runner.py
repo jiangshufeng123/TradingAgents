@@ -240,8 +240,10 @@ def run_analysis(job: Job, user: User, config: dict, should_stop, poll: float = 
              "input_tokens": int(_float(r.get("input_tokens")) or 0),
              "output_tokens": int(_float(r.get("output_tokens")) or 0),
              "run_time": r.get("run_time")} for r in rows]
-    if proc.returncode != 0 and not runs:
-        raise RuntimeError(f"the batch exited with code {proc.returncode}; see the log")
+    if not runs:
+        # Nothing analysed (every ticker failed, or the batch did not start): a failed job,
+        # not a finished one with an empty result.
+        raise RuntimeError(f"no ticker produced a result (exit code {proc.returncode}); see the log")
     # The run writes the canonical symbol (603980.SH is recorded as 603980.SS): compare those.
     done = {_canonical(r["ticker"]) for r in runs}
     missing = [t for t in job.params["tickers"] if _canonical(t) not in done]

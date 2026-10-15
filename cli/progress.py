@@ -14,6 +14,7 @@ service reads to move its progress bar.
 
 from __future__ import annotations
 
+import sys
 import threading
 from datetime import datetime
 from typing import Any
@@ -62,8 +63,9 @@ class PlainProgress(BaseCallbackHandler):
     def _print(self, text: str) -> None:
         # One write per line: print() writes the text and the newline separately, so lines
         # from analysts finishing at the same moment could run together.
-        self.out.write(f"{datetime.now():%H:%M:%S} {text}\n")
-        self.out.flush()
+        out = self.out or sys.stdout          # None: standard output, as print() treats it
+        out.write(f"{datetime.now():%H:%M:%S} {text}\n")
+        out.flush()
 
     @staticmethod
     def _node(kwargs: dict, serialized) -> str | None:
