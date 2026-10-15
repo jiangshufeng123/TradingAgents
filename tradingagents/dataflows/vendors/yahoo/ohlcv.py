@@ -30,6 +30,19 @@ MAX_OHLCV_STALE_DAYS = 10
 # at all (weekend, holiday) cannot trigger a download on every call.
 OHLCV_CACHE_TTL_SECONDS = 900
 
+# Every indicator call reloads the same frame, so a data warning would otherwise
+# repeat once per indicator; each (symbol, bar date) is reported once per process.
+_warned: set = set()
+# AkShare bars fetched for a closeless tail, per (symbol, first date, last date).
+_fills: dict = {}
+
+
+def _warn_once(key, message, *args) -> None:
+    if key in _warned:
+        return
+    _warned.add(key)
+    logger.warning(message, *args)
+
 
 def _ensure_date_column(data: pd.DataFrame) -> pd.DataFrame:
     """Normalize the date column to ``Date``.
@@ -83,6 +96,57 @@ def _clean_dataframe(data: pd.DataFrame) -> pd.DataFrame:
 
     price_cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in data.columns]
     data[price_cols] = data[price_cols].apply(pd.to_numeric, errors="coerce")
+    return data
+
+
+def _fill_closeless_tail(data: pd.DataFrame, canonical: str) -> pd.DataFrame:
+    """Fill the trailing closeless bars of an A-share/HK listing from AkShare.
+
+    Only bars whose session has ended are filled, and only from a bar AkShare
+    reports for the same date. The fill is in memory: the Yahoo cache keeps its
+    own rows, so Yahoo's own close replaces it once published.
+    """
+    if data.empty or not pd.isna(data["Close"].iloc[-1]):
+        return data
+    from tradingagents.dataflows.vendors import akshare_cn
+
+    if not akshare_cn.is_cn_or_hk(canonical):
+        return data
+    closes = data["Close"].to_numpy()
+    first = len(data)
+    while first > 0 and pd.isna(closes[first - 1]):
+        first -= 1
+    tail_dates = data["Date"].iloc[first:]
+    key = (canonical, tail_dates.min(), tail_dates.max())
+    if key not in _fills:
+        # Remembered, empty answers too: every indicator reloads this frame, and
+        # an unreachable source must cost its timeouts once, not once per call.
+        try:
+            _fills[key] = akshare_cn.daily_bars(canonical, tail_dates.min(), tail_dates.max())
+        except Exception as exc:   # a fill is a bonus; never fail the price load on it
+            logger.debug("%s: AkShare fill failed: %s", canonical, exc)
+            _fills[key] = (pd.DataFrame(), "")
+    bars, source = _fills[key]
+    if bars.empty:
+        return data
+    by_date = bars.set_index("Date")
+    data = data.copy()
+    filled = []
+    for idx in data.index[first:]:
+        day = data.at[idx, "Date"]
+        if day not in by_date.index:
+            continue
+        bar = by_date.loc[day]
+        for col in ("Open", "High", "Low", "Close", "Volume"):
+            if col in data.columns:
+                data.at[idx, col] = float(bar[col])
+        filled.append(day.strftime("%Y-%m-%d"))
+    if filled:
+        _warn_once(
+            (canonical, "filled", filled[-1]),
+            "%s: Yahoo has no close for %s; using %s's daily bar (unadjusted).",
+            canonical, ", ".join(filled), source,
+        )
     return data
 
 
@@ -246,6 +310,10 @@ def load_ohlcv(symbol: str, as_of_date: str, fill_gaps: bool = True) -> pd.DataF
     # A bar whose session is still trading is not a day's result yet.
     data = drop_unsettled_bar(data, session, canonical)
 
+    # Yahoo sometimes lists a finished A-share/HK session without its close;
+    # take that close from AkShare before falling back to the previous bar.
+    data = _fill_closeless_tail(data, canonical)
+
     # A closeless newest bar is an unsettled session, not a symbol without data.
     # _fill_price_gaps below drops it, here and mid-series alike, so the frame
     # ends at the last settled bar; only a range with no close anywhere is no
@@ -256,7 +324,8 @@ def load_ohlcv(symbol: str, as_of_date: str, fill_gaps: bool = True) -> pd.DataF
             raise NoMarketDataError(
                 symbol, canonical, "no bar in range has a closing price"
             )
-        logger.warning(
+        _warn_once(
+            (canonical, str(data["Date"].iloc[-1].date())),
             "%s: %d trailing bar(s) through %s have no closing price; using %s "
             "as the latest close.", canonical, len(data) - settled[-1] - 1,
             data["Date"].iloc[-1].date(), data["Date"].iloc[settled[-1]].date(),

@@ -221,3 +221,14 @@ def test_reddit_full_page_does_not_vouch_for_older_days(monkeypatch):
         start_date=str(today - timedelta(days=6)), end_date=str(today - timedelta(days=5)),
     )
     assert "unavailable" in out and "no reddit posts" not in out.lower()
+
+
+def test_stocktwits_skips_a_share_and_hk_listings_without_a_request(monkeypatch, caplog):
+    def boom(*a, **k):
+        raise AssertionError("no request for an uncovered listing")
+
+    monkeypatch.setattr(stocktwits, "urlopen", boom)
+    for ticker in ("000960.SZ", "603980.SH", "600519.SS", "6616.HK"):
+        out = stocktwits.fetch_stocktwits_messages(ticker, start_date="2026-10-08", end_date="2026-10-15")
+        assert "does not cover" in out
+    assert "fetch failed" not in caplog.text

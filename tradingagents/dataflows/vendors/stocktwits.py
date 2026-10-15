@@ -71,6 +71,16 @@ def _stocktwits_symbol(ticker: str) -> str:
     return f"{base}.X" if base else ticker.strip().upper()
 
 
+def _not_covered(ticker: str) -> bool:
+    """A-share and Hong Kong listings, which StockTwits does not carry."""
+    from tradingagents.dataflows.vendors.akshare_cn import is_cn_or_hk
+
+    try:
+        return is_cn_or_hk(ticker)
+    except Exception:
+        return False
+
+
 def fetch_stocktwits_messages(
     ticker: str,
     limit: int = 30,
@@ -94,6 +104,10 @@ def fetch_stocktwits_messages(
     symbol has no messages, or the response shape is unexpected — the
     caller never has to special-case None or exceptions.
     """
+    if _not_covered(ticker):
+        # StockTwits has no streams for A-share/HK listings (every call 404s), so
+        # skip the request and say so instead of logging a failure each run.
+        return f"<StockTwits does not cover {ticker.upper()} (A-share/Hong Kong listing)>"
     url = _API.format(ticker=_stocktwits_symbol(ticker))
     req = Request(url, headers={"User-Agent": _UA, "Accept": "application/json"})
     try:

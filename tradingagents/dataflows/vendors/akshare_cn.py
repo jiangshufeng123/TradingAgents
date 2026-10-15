@@ -29,6 +29,7 @@ import os
 import threading
 import time
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -41,6 +42,8 @@ from tradingagents.dataflows.errors import (
 from tradingagents.dataflows.symbols import normalize_symbol
 
 logger = logging.getLogger(__name__)
+
+_BEIJING = ZoneInfo("Asia/Shanghai")
 
 CN_HOSTS = (
     "eastmoney.com", "sina.com.cn", "sinajs.cn", "10jqka.com.cn", "cls.cn", "baidu.com",
@@ -617,3 +620,64 @@ def get_china_market_context(ticker: str, curr_date: str, look_back_days: int | 
         except VendorUnavailableError as exc:
             lines.append(f"Stock Connect flows unavailable: {exc}")
     return "\n".join(lines)
+
+
+# --- daily bars (to fill a close Yahoo has not published) ----------------------
+
+# When each market's session has closed, Beijing time; a bar for today is only
+# final after this.
+_CLOSE_HHMM = {"sh": (15, 5), "sz": (15, 5), "hk": (16, 15)}
+
+
+def _session_over(market: str, day: pd.Timestamp, now: datetime | None = None) -> bool:
+    now = now or datetime.now(_BEIJING)
+    today = pd.Timestamp(now.date())
+    if day.normalize() < today:
+        return True
+    hh, mm = _CLOSE_HHMM[market]
+    return day.normalize() == today and (now.hour, now.minute) >= (hh, mm)
+
+
+def _bars(df: pd.DataFrame, cols: dict, volume_scale: float = 1.0) -> pd.DataFrame:
+    if df is None or df.empty or not set(cols) <= set(df.columns):
+        return pd.DataFrame()
+    out = df[list(cols)].rename(columns=cols)
+    out["Date"] = pd.to_datetime(out["Date"], errors="coerce").dt.normalize()
+    for c in ("Open", "High", "Low", "Close", "Volume"):
+        out[c] = pd.to_numeric(out[c], errors="coerce")
+    out["Volume"] = out["Volume"] * volume_scale
+    return out.dropna(subset=["Date", "Close"])
+
+
+def daily_bars(ticker: str, start: pd.Timestamp, end: pd.Timestamp) -> tuple[pd.DataFrame, str]:
+    """Unadjusted daily bars ``Date/Open/High/Low/Close/Volume`` (shares) in [start, end].
+
+    Only sessions that have closed are returned. A-shares try East Money, then
+    Sina; Hong Kong uses Sina. Returns (frame, source); an empty frame when no
+    source answered.
+    """
+    market, code = _require(ticker)
+    s, e = start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
+    en = {"日期": "Date", "开盘": "Open", "最高": "High", "最低": "Low", "收盘": "Close", "成交量": "Volume"}
+    lower = {"date": "Date", "open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume"}
+    if market == "hk":
+        attempts = [("Sina", "stock_hk_daily", {"symbol": code, "adjust": ""}, lower, 1.0)]
+    else:
+        attempts = [
+            # East Money reports volume in lots of 100 shares.
+            ("East Money", "stock_zh_a_hist",
+             {"symbol": code, "period": "daily", "start_date": s, "end_date": e, "adjust": ""}, en, 100.0),
+            ("Sina", "stock_zh_a_daily",
+             {"symbol": f"{market}{code}", "start_date": s, "end_date": e, "adjust": ""}, lower, 1.0),
+        ]
+    for source, func, kwargs, cols, scale in attempts:
+        try:
+            bars = _bars(call(func, **kwargs), cols, scale)
+        except Exception as exc:   # any source failing just means trying the next
+            logger.debug("%s daily bars from %s failed: %s", ticker, source, exc)
+            continue
+        bars = bars[(bars["Date"] >= start.normalize()) & (bars["Date"] <= end.normalize())]
+        bars = bars[[_session_over(market, d) for d in bars["Date"]]]
+        if not bars.empty:
+            return bars.reset_index(drop=True), source
+    return pd.DataFrame(), ""

@@ -272,3 +272,38 @@ def test_a_request_that_hangs_is_abandoned_not_waited_on(monkeypatch):
         cn.call("stuck")
     assert cn.time.time() - started < 2
     release.set()
+
+
+@pytest.mark.unit
+def test_daily_bars_scale_east_money_lots_and_skip_an_open_session(monkeypatch):
+    from datetime import datetime
+
+    seen = []
+
+    def fake_call(func, **kw):
+        seen.append(func)
+        return pd.DataFrame({"日期": ["2026-10-14", "2026-10-15"], "开盘": [20.5, 21.0], "最高": [21.5, 21.6],
+                             "最低": [20.1, 20.9], "收盘": [21.3, 21.4], "成交量": [60000, 1000]})
+
+    monkeypatch.setattr(cn, "call", fake_call)
+    noon = datetime(2026, 10, 15, 12, 0, tzinfo=cn._BEIJING)
+    monkeypatch.setattr(cn, "_session_over",
+                        lambda market, day, now=None, _f=cn._session_over: _f(market, day, noon))
+    bars, source = cn.daily_bars("000960.SZ", pd.Timestamp("2026-10-14"), pd.Timestamp("2026-10-15"))
+    assert source == "East Money" and seen == ["stock_zh_a_hist"]
+    assert list(bars["Date"]) == [pd.Timestamp("2026-10-14")]      # 10-15 still trading at noon
+    assert bars["Volume"].iloc[0] == 6_000_000                       # lots of 100 -> shares
+
+
+@pytest.mark.unit
+def test_daily_bars_fall_back_to_sina_for_a_shares(monkeypatch):
+    def fake_call(func, **kw):
+        if func == "stock_zh_a_hist":
+            raise RuntimeError("East Money down")
+        assert func == "stock_zh_a_daily" and kw["symbol"] == "sz000960"
+        return pd.DataFrame({"date": ["2026-10-14"], "open": [20.5], "high": [21.5], "low": [20.1],
+                             "close": [21.3], "volume": [6_000_000]})
+
+    monkeypatch.setattr(cn, "call", fake_call)
+    bars, source = cn.daily_bars("000960.SZ", pd.Timestamp("2026-10-14"), pd.Timestamp("2026-10-14"))
+    assert source == "Sina" and bars["Close"].iloc[0] == 21.3

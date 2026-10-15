@@ -207,3 +207,93 @@ def test_the_snapshot_does_not_present_a_filled_price_as_reported(monkeypatch, t
     row = out.split("Latest verified OHLCV row")[1].split("###")[0]
     assert "104.50" not in row and "105.50" not in row  # the previous session's numbers
     assert "106.00" in row  # the close the vendor did report
+
+
+@pytest.mark.unit
+def test_a_closeless_latest_bar_is_reported_once_not_per_indicator(monkeypatch, tmp_path, caplog):
+    monkeypatch.setattr(ohlcv, "_warned", set())
+    frame = pd.DataFrame({
+        "Date": ["2026-05-07", "2026-05-08"],
+        "Open": [100.0, 101.0], "High": [101.0, 102.0], "Low": [99.0, 100.0],
+        "Close": [100.5, float("nan")], "Volume": [1_000_000, 1_000_000],
+    })
+    caplog.set_level("WARNING", logger=ohlcv.logger.name)
+    for _ in range(3):
+        _run_load(monkeypatch, tmp_path, frame, "2026-05-08")
+    assert caplog.text.count("have no closing price") == 1
+
+
+# --- A-share/HK: a finished session Yahoo lists without its close -------------
+
+def _cn_frame():
+    return pd.DataFrame({
+        "Date": ["2026-10-13", "2026-10-14"],
+        "Open": [20.0, 20.5], "High": [21.0, 21.2], "Low": [19.8, 20.1],
+        "Close": [20.6, float("nan")], "Volume": [5_000_000, float("nan")],
+    })
+
+
+def _load_cn(monkeypatch, tmp_path, frame, curr_date="2026-10-15"):
+    monkeypatch.setattr(ohlcv, "get_config", lambda: {"data_cache_dir": str(tmp_path)})
+    today = pd.Timestamp(curr_date)
+    monkeypatch.setattr(ohlcv.pd.Timestamp, "today", staticmethod(lambda: today))
+    cache_file = tmp_path / "000960.SZ-YFin-data.csv"
+    cache_file.write_text(frame.to_csv(index=False))
+    _stamp(cache_file, today)
+    monkeypatch.setattr(ohlcv.yf, "Ticker", lambda s: SimpleNamespace(history=lambda **k: 1 / 0))
+    return ohlcv.load_ohlcv("000960.SZ", curr_date)
+
+
+@pytest.mark.unit
+def test_a_closeless_a_share_bar_is_filled_from_akshare_once(monkeypatch, tmp_path, caplog):
+    from tradingagents.dataflows.vendors import akshare_cn
+
+    monkeypatch.setattr(ohlcv, "_warned", set())
+    monkeypatch.setattr(ohlcv, "_fills", {})
+    calls = []
+
+    def fake_bars(ticker, start, end):
+        calls.append((ticker, start, end))
+        return pd.DataFrame({"Date": [pd.Timestamp("2026-10-14")], "Open": [20.5], "High": [21.5],
+                             "Low": [20.1], "Close": [21.3], "Volume": [6_000_000.0]}), "East Money"
+
+    monkeypatch.setattr(akshare_cn, "daily_bars", fake_bars)
+    caplog.set_level("WARNING", logger=ohlcv.logger.name)
+    for _ in range(3):
+        out = _load_cn(monkeypatch, tmp_path, _cn_frame())
+    assert out["Date"].iloc[-1] == pd.Timestamp("2026-10-14")
+    assert out["Close"].iloc[-1] == 21.3 and out["Volume"].iloc[-1] == 6_000_000
+    assert len(calls) == 1
+    assert caplog.text.count("using East Money's daily bar") == 1
+    assert "have no closing price" not in caplog.text
+
+
+@pytest.mark.unit
+def test_without_an_akshare_bar_the_previous_close_is_used_and_asked_once(monkeypatch, tmp_path):
+    from tradingagents.dataflows.vendors import akshare_cn
+
+    monkeypatch.setattr(ohlcv, "_fills", {})
+    calls = []
+
+    def unavailable(*a):
+        calls.append(a)
+        raise RuntimeError("unreachable")
+
+    monkeypatch.setattr(akshare_cn, "daily_bars", unavailable)
+    for _ in range(3):
+        out = _load_cn(monkeypatch, tmp_path, _cn_frame())
+    assert out["Date"].iloc[-1] == pd.Timestamp("2026-10-13") and out["Close"].iloc[-1] == 20.6
+    assert len(calls) == 1
+
+
+@pytest.mark.unit
+def test_a_us_listing_never_asks_akshare(monkeypatch, tmp_path):
+    from tradingagents.dataflows.vendors import akshare_cn
+
+    monkeypatch.setattr(akshare_cn, "daily_bars", lambda *a: 1 / 0)
+    frame = pd.DataFrame({
+        "Date": ["2026-05-07", "2026-05-08"],
+        "Open": [100.0, 101.0], "High": [101.0, 102.0], "Low": [99.0, 100.0],
+        "Close": [100.5, float("nan")], "Volume": [1_000_000, 1_000_000],
+    })
+    assert _run_load(monkeypatch, tmp_path, frame, "2026-05-08")["Close"].iloc[-1] == 100.5

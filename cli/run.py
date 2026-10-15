@@ -431,7 +431,12 @@ def run_analysis(checkpoint: bool | None = None, portfolio=None, flags=None):
         _print_vote(vote)
         if vote["representative"] is not None:
             final_state = run_states[vote["representative"]]
-        graph.record_decision(selections["ticker"], selections["analysis_date"], final_state)
+        if vote["rating"] and vote["rating"] != run_rating(final_state):
+            # A split vote: the consensus is a rating no single run gave.
+            graph.record_decision(selections["ticker"], selections["analysis_date"], final_state,
+                                  rating=vote["rating"])
+        else:
+            graph.record_decision(selections["ticker"], selections["analysis_date"], final_state)
 
     usage = summarize(stats_handler.usage, config)
     _print_usage(usage)
@@ -540,7 +545,7 @@ def _record_cost(usage, graph, config, selections, final_state, saved_to, elapse
             run_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             ticker=selections["ticker"],
             trade_date=selections.get("analysis_date", ""),
-            rating=run_rating(final_state),
+            rating=(vote or {}).get("rating") or run_rating(final_state),
             analysts=[getattr(a, "value", a) for a in selections.get("analysts", [])],
             config=config,
             elapsed_seconds=elapsed,

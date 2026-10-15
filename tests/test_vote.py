@@ -162,3 +162,31 @@ def test_one_run_behaves_as_before(tmp_path, monkeypatch):
     offered = _run(monkeypatch, tmp_path, graph, 1)
     assert graph.calls == [("record_decision", "Buy")]
     assert offered["vote_markdown"] is None
+
+
+@pytest.mark.unit
+def test_an_even_split_in_opposite_directions_is_hold_not_the_first_listed_side():
+    for runs in (["Overweight", "Underweight"], ["Underweight", "Overweight"], ["Buy", "Sell"]):
+        vote = consensus(runs)
+        assert vote["rating"] == "Hold" and vote["split"]
+        assert vote["representative"] == 0
+        assert "opposite" in agreement_label(vote)
+        assert "No run gave Hold" in render_markdown(vote)
+    # ties on the same side are not splits
+    vote = consensus(["Buy", "Overweight"])
+    assert vote["rating"] == "Overweight" and not vote["split"]
+    # an uneven split still goes to the side nearer the average
+    assert consensus(["Overweight", "Sell"])["rating"] == "Overweight"
+
+
+@pytest.mark.unit
+def test_a_split_vote_records_the_consensus_rating(tmp_path):
+    from tradingagents.graph.trading_graph import TradingAgentsGraph
+    from tradingagents.memory.log import TradingMemoryLog
+
+    graph = TradingAgentsGraph.__new__(TradingAgentsGraph)
+    graph.memory_log = TradingMemoryLog({"memory_log_path": str(tmp_path / "log.md")})
+    graph._log_state = lambda *a: None
+    graph.record_decision("6616.HK", "2026-10-15", {"final_trade_decision": "**Rating**: Overweight"},
+                          rating="Hold")
+    assert "[2026-10-15 | 6616.HK | Hold | pending]" in (tmp_path / "log.md").read_text(encoding="utf-8")
