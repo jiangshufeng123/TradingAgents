@@ -107,6 +107,17 @@ def recent(s: Session, user_id: int, limit: int = 20) -> list[Job]:
     return list(s.scalars(select(Job).where(Job.user_id == user_id).order_by(Job.id.desc()).limit(limit)))
 
 
+def page(s: Session, user_id: int, kind: str, number: int = 1, size: int = 10) -> tuple[list[Job], int]:
+    """One page (from 1) of the user's jobs of a kind, newest first, and how many there are."""
+    from sqlalchemy import func
+
+    where = (Job.user_id == user_id) & (Job.kind == kind)
+    total = s.scalar(select(func.count()).select_from(Job).where(where)) or 0
+    rows = s.scalars(select(Job).where(where).order_by(Job.id.desc())
+                     .offset((max(1, number) - 1) * size).limit(size))
+    return list(rows), total
+
+
 def next_queued(s: Session) -> Job | None:
     return s.scalar(select(Job).where(Job.status == "queued").order_by(Job.id).limit(1))
 

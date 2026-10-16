@@ -485,10 +485,17 @@ const ScreenView = {
       catch (e) { fail(e); } finally { reviewBusy.value = false; }
     }
     const presetName = k => (presets.value.find(p => p.key === k) || {}).name || k;
-    const history = ref([]);
+    // Every screen, a page at a time: an old one can still be opened and switched.
+    const history = ref([]), historyPage = ref(1), historyTotal = ref(0), HISTORY_SIZE = 10;
+    const historyPages = computed(() => Math.max(1, Math.ceil(historyTotal.value / HISTORY_SIZE)));
     let timer;
-    async function loadHistory() {
-      try { history.value = (await api("/jobs?limit=30")).filter(j => j.kind === "screen").slice(0, 8); } catch (e) { fail(e); }
+    async function loadHistory(page) {
+      if (page) historyPage.value = page;
+      try {
+        const r = await api(`/screens?page=${historyPage.value}&size=${HISTORY_SIZE}`);
+        history.value = r.items; historyTotal.value = r.total;
+        if (!r.items.length && historyPage.value > 1) return loadHistory(historyPages.value);
+      } catch (e) { fail(e); }
     }
     // The scoreboard switch of a screen (on unless switched off).
     const trackBusy = ref(null);
@@ -499,8 +506,8 @@ const ScreenView = {
       trackBusy.value = h.id;
       try {
         const r = await api(`/screens/${h.id}/track`, { method: "POST", body: { track: on } });
-        h.params = { ...(h.params || {}), track: on };
-        if (job.value && job.value.id === h.id) job.value.params = { ...job.value.params, track: on };
+        for (const x of [h, job.value, history.value.find(r => r.id === h.id)])
+          if (x && x.id === h.id) x.params = { ...(x.params || {}), track: on };
         toast(on ? (h.status === "done" ? `${jobNo(h)} 已计入成绩单（${r.kept} 只）` : `${jobNo(h)} 完成后会计入成绩单`) : `${jobNo(h)} 已从成绩单去掉`);
       } catch (e) { fail(e); } finally { trackBusy.value = null; }
     }
@@ -529,7 +536,7 @@ const ScreenView = {
     }
     async function run(body) {
       busy.value = true;
-      try { const j = await api("/screens", { method: "POST", body }); job.value = j; spec.value = null; picked.value = new Set(); poll(j.id); }
+      try { const j = await api("/screens", { method: "POST", body }); job.value = j; spec.value = null; picked.value = new Set(); poll(j.id); loadHistory(1); }
       catch (e) { fail(e); } finally { busy.value = false; }
     }
     const start = () => (request.value.trim() || preset.value) && run({ request: request.value.trim(), preset: preset.value });
@@ -576,7 +583,7 @@ const ScreenView = {
     return { request, job, busy, picked, spec, history, rows, allPicked, fieldList, FIELDS, OPS, presets, preset,
              presetName, setPreset, ranking, weightsOf, reviews, reviewTop, reviewBusy, reviewed, reviewing, lastReviewFailed, startReview, withName,
              start, rerun, addCond, setOp, toggle, toggleAll, addPicked, open, numf, when, jobTitle, jobNo,
-             trackBusy, tracked, canTrack, toggleTrack };
+             trackBusy, tracked, canTrack, toggleTrack, historyPage, historyTotal, historyPages, loadHistory };
   },
   template: `<div class="page">
     <div class="page-head"><div><h1>选股</h1><p>先按条件在全市场 A 股里筛选，再按价值、质量、成长、动量、低波动、流动性六类因子综合打分排序。结果不会自动加入自选股。</p></div></div>
@@ -597,7 +604,13 @@ const ScreenView = {
 
     <section class="section" v-if="job">
       <div class="row" style="justify-content:space-between;margin-bottom:12px">
-        <h2>{{ job.params.request || (job.params.preset ? '策略：' + presetName(job.params.preset) : '按条件筛选') }}<span class="muted small num job-no">任务编号 {{ jobNo(job) }}</span></h2><StatusTag :status="job.status"/>
+        <h2>{{ job.params.request || (job.params.preset ? '策略：' + presetName(job.params.preset) : '按条件筛选') }}<span class="muted small num job-no">任务编号 {{ jobNo(job) }}</span></h2>
+        <div class="row" style="gap:14px">
+          <label class="switch-label small" v-if="canTrack(job)">计入成绩单
+            <button type="button" role="switch" class="switch" :aria-checked="tracked(job)" :disabled="trackBusy === job.id"
+              :title="tracked(job) ? '这次选股的前 10 名计入成绩单的选股策略成绩，点一下取消' : '没有计入成绩单，点一下计入'"
+              @click="toggleTrack(job)"><span></span></button></label>
+          <StatusTag :status="job.status"/></div>
       </div>
       <div v-if="['queued','running','cancelling'].includes(job.status)" class="note">正在下载全市场行情、筛选并打分；排在前面的股票还要取日线算波动和中期动量，通常需要 30 秒到 2 分钟。</div>
       <div v-if="job.status === 'failed'" class="note err">{{ job.error }}</div>
@@ -688,7 +701,7 @@ const ScreenView = {
     </section>
 
     <section class="section" v-if="history.length">
-      <h2>最近的选股</h2>
+      <h2>最近的选股 <span class="muted num" style="font-weight:400">{{ historyTotal }}</span></h2>
       <div class="panel table-wrap"><table class="t">
         <thead><tr><th>任务编号</th><th class="sm-hide">状态</th><th>内容</th><th class="c"><span class="sm-hide">计入成绩单</span><span class="sm-only">计入</span></th><th class="r sm-hide">时间</th></tr></thead><tbody>
         <tr v-for="h in history" :key="h.id" style="cursor:pointer" :class="{ picked: job && job.id === h.id }" @click="open(h.id)">
@@ -700,7 +713,12 @@ const ScreenView = {
               :aria-label="'选股任务 ' + jobNo(h) + ' 计入成绩单'" @click="toggleTrack(h)"><span></span></button></td>
           <td class="r muted small when sm-hide">{{ when(h.created_at) }}</td></tr>
       </tbody></table></div>
-      <p class="muted small" style="margin-top:8px">“计入成绩单”打开时，这次选股的前 10 名会记入成绩单的选股策略成绩，之后按 5 日、20 日检验；关掉就从成绩单里去掉。新选股默认打开。</p>
+      <div v-if="historyPages > 1" class="pager">
+        <button class="btn" :disabled="historyPage <= 1" @click="loadHistory(historyPage - 1)">上一页</button>
+        <span class="small muted num">第 {{ historyPage }} / {{ historyPages }} 页</span>
+        <button class="btn" :disabled="historyPage >= historyPages" @click="loadHistory(historyPage + 1)">下一页</button>
+      </div>
+      <p class="muted small" style="margin-top:8px">“计入成绩单”打开时，这次选股的前 10 名会记入成绩单的选股策略成绩，之后按 5 日、20 日检验；关掉就从成绩单里去掉。新选股默认打开；打开某次选股后，标题右边也有同样的开关。</p>
     </section>
   </div>`,
 };

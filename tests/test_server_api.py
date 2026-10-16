@@ -597,3 +597,30 @@ def test_switching_a_screen_on_and_off_for_the_scoreboard(app, env):
         assert {p.ticker for p in s.query(ScreenPick).filter_by(job_id=screen.id)} == {"600519.SS", "000858.SZ"}
     amy = _client(app, "amy", "user-pass-1")
     assert amy.post(f"/api/screens/{screen.id}/track", json={"track": False}, headers=H).status_code == 404
+
+
+@pytest.mark.unit
+def test_screens_are_listed_a_page_at_a_time(app, env):
+    ian = _client(app)
+    with db.session() as s:
+        ids = [jobs.create(s, 1, "screen", {"request": f"s{i}"}).id for i in range(12)]
+        jobs.create(s, 1, "analysis", {"tickers": ["600519.SS"]})
+        jobs.create(s, 2, "screen", {"request": "amy's"})
+    first = ian.get("/api/screens?size=5").json()
+    assert first["total"] == 12 and [j["id"] for j in first["items"]] == ids[::-1][:5]
+    last = ian.get("/api/screens?page=3&size=5").json()
+    assert [j["id"] for j in last["items"]] == ids[1::-1] and last["items"][0]["serial"]
+    assert ian.get("/api/screens?page=9&size=5").json()["items"] == []
+
+
+@pytest.mark.unit
+def test_page_files_are_checked_with_the_service_before_reuse(app):
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    for path in ("/", "/app.js", "/app.css"):
+        response = client.get(path)
+        assert response.status_code == 200 and response.headers["cache-control"] == "no-cache", path
+    etag = client.get("/app.js").headers["etag"]
+    assert client.get("/app.js", headers={"If-None-Match": etag}).status_code == 304
+    assert "cache-control" not in client.get("/vendor/vue-3.5.13.global.prod.js").headers

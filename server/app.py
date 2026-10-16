@@ -656,6 +656,15 @@ def create_app(config: dict | None = None, *, start_worker: bool = True, start_s
                                                  "weights": p.weights, "filters": list(p.filters)}
                                                 for p in PRESETS.values()]}
 
+    @app.get("/api/screens")
+    def screens_list(page: int = 1, size: int = 10, user: User = Depends(current_user)):
+        """The user's screens, newest first, a page at a time (every one stays reachable, so its
+        scoreboard switch can be turned however old it is)."""
+        size = max(1, min(size, 50))
+        with db.session() as s:
+            rows, total = jobs.page(s, user.id, "screen", max(1, page), size)
+            return {"items": [_job_out(j) for j in rows], "total": total, "page": max(1, page), "size": size}
+
     @app.post("/api/screens")
     def screen_create(body: ScreenIn, user: User = Depends(current_user)):
         from tradingagents.scoring import PRESETS
@@ -854,6 +863,18 @@ def create_app(config: dict | None = None, *, start_worker: bool = True, start_s
     if static.exists():
         from fastapi.staticfiles import StaticFiles
 
-        app.mount("/", StaticFiles(directory=static, html=True), name="pages")
+        class Pages(StaticFiles):
+            """The web page files. A browser must check with the service before reusing its
+            copy ("no-cache": an unchanged file costs a 304), otherwise after an update it can
+            keep running the old app.js against the new service. The vendor files carry their
+            version in the name and may be cached as usual."""
+
+            async def get_response(self, path, scope):
+                response = await super().get_response(path, scope)
+                if not path.replace("\\", "/").startswith("vendor/"):
+                    response.headers["Cache-Control"] = "no-cache"
+                return response
+
+        app.mount("/", Pages(directory=static, html=True), name="pages")
     app.state.wake = _wake
     return app
