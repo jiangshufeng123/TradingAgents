@@ -213,12 +213,17 @@ def _unique(picks: list[ScreenPick]) -> list[ScreenPick]:
     return out
 
 
-def screens(mine: list[ScreenPick], jobs: dict, user_id: int | None = None) -> tuple[list[dict], int]:
+def screens(mine: list[ScreenPick], jobs: dict, user_id: int | None = None,
+            name: str = "") -> tuple[list[dict], int]:
     """A strategy's picks grouped by screen job, newest first (at most ``DETAIL_SCREENS``),
     and how many older ones were left out. ``jobs``: job id -> its row, for the number
     (``serial``) and the conditions (``spec``) that tell two screens of a strategy apart.
     ``mine`` says whether ``user_id`` ran it (the page links to it; other accounts' screens
-    are not theirs to open). Picks with no job (a screen whose job is gone) group by day."""
+    are not theirs to open). Picks with no job (a screen whose job is gone) group by day.
+
+    Another account's screen shows its number, day, strategy (``name``) and results only:
+    its description and conditions are that person's own ideas, so ``request`` is empty,
+    ``spec`` None and ``label`` the strategy's name."""
     groups: dict = {}
     for p in mine:
         groups.setdefault(p.job_id if p.job_id is not None else ("day", p.as_of), []).append(p)
@@ -234,10 +239,12 @@ def screens(mine: list[ScreenPick], jobs: dict, user_id: int | None = None) -> t
         job = jobs.get(key) if isinstance(key, int) else None
         result = (job.result or {}) if job is not None else {}
         rows = [_pick_out(p) for p in picks]
+        owned = user_id is not None and all(p.user_id == user_id for p in picks)
         item = {"job": key if isinstance(key, int) else None, "serial": job.serial if job is not None else None,
-                "mine": user_id is not None and picks[0].user_id == user_id and job is not None,
-                "as_of": picks[0].as_of, "label": picks[0].label or "",
-                "request": str(result.get("request") or ""), "spec": result.get("spec"),
+                "mine": owned and job is not None,
+                "as_of": picks[0].as_of, "label": (picks[0].label or "") if owned else name,
+                "request": str(result.get("request") or "") if owned else "",
+                "spec": result.get("spec") if owned else None,
                 "picks": rows, "check_from": (date.fromisoformat(picks[0].as_of) + timedelta(days=7)).isoformat()}
         for n in HORIZONS:
             done = [r for r in rows if r[f"excess_{n}"] is not None]
@@ -250,15 +257,21 @@ def screens(mine: list[ScreenPick], jobs: dict, user_id: int | None = None) -> t
     return out, max(0, len(keys) - DETAIL_SCREENS)
 
 
-def summary(s: Session, user_id: int | None = None) -> dict:
+def summary(s: Session, user_id: int | None = None, only_mine: bool = False) -> dict:
     """Per strategy: stocks kept (one per day), and for each horizon the checked count,
     average excess return over the benchmark and the share that beat it, with each screen
-    job's own picks (``screens``); plus the latest checked picks."""
+    job's own picks (``screens``); plus the latest checked picks.
+
+    Every account's screens count by default (more picks, steadier figures); ``only_mine``
+    keeps ``user_id``'s alone, every figure worked out from those."""
     from tradingagents.scoring import PRESETS
 
     from server.models import Job
 
     picks = list(s.scalars(select(ScreenPick)))
+    everyone = len(picks)
+    if only_mine:
+        picks = [p for p in picks if user_id is not None and p.user_id == user_id]
     ids = {p.job_id for p in picks if p.job_id}
     jobs = {j.id: j for j in s.scalars(select(Job).where(Job.id.in_(ids)))} if ids else {}
     order = list(PRESETS) + ["custom"]
@@ -276,13 +289,16 @@ def summary(s: Session, user_id: int | None = None) -> dict:
             row[f"excess_{n}"] = sum(excess) / len(excess) if excess else None
             row[f"beat_{n}"] = sum(1 for x in excess if x > 0) / len(excess) if excess else None
             row[f"ret_{n}"] = sum(getattr(p, f"ret_{n}") for p in done) / len(done) if done else None
-        row["jobs"], row["older_jobs"] = screens(mine, jobs, user_id)
+        row["jobs"], row["older_jobs"] = screens(mine, jobs, user_id, row["name"])
         out.append(row)
     recent = sorted((p for p in picks if p.ret_5 is not None), key=lambda p: (p.as_of, p.strategy, p.rank),
                     reverse=True)[:30]
     pending = len({(p.strategy, p.as_of, p.ticker) for p in picks if p.ret_5 is None})
+    names = {r["strategy"]: r["name"] for r in out}
     return {"strategies": out, "pending": pending, "horizons": list(HORIZONS), "benchmark": BENCHMARK,
-            "recent": [{"as_of": p.as_of, "strategy": p.strategy, "label": p.label, "rank": p.rank,
+            "scope": "mine" if only_mine else "all", "all_picks": everyone,
+            "recent": [{"as_of": p.as_of, "strategy": p.strategy, "rank": p.rank,
+                        "label": p.label if user_id is not None and p.user_id == user_id else names.get(p.strategy, ""),
                         "job": p.job_id, "serial": jobs[p.job_id].serial if p.job_id in jobs else None,
                         "ticker": p.ticker, "score": p.score, "ret_5": p.ret_5, "bench_5": p.bench_5,
                         "ret_20": p.ret_20, "bench_20": p.bench_20} for p in recent]}

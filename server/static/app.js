@@ -1304,7 +1304,20 @@ const ScoreView = {
   components: { Seal, RatingBars, TasksPanel },
   setup() {
     const data = ref(null), error = ref("");
-    async function loadBoard() { try { data.value = await api("/scoreboard"); } catch (e) { error.value = e.message; } }
+    // Screen strategies: every account's screens, or only mine (remembered in this browser).
+    let saved = "all";
+    try { saved = localStorage.getItem("ta.screenScope") || "all"; } catch (e) { /* private window */ }
+    const scope = ref(saved === "mine" ? "mine" : "all");
+    async function loadBoard() {
+      try { data.value = await api("/scoreboard" + (scope.value === "mine" ? "?screens=mine" : "")); }
+      catch (e) { error.value = e.message; }
+    }
+    async function setScope(v) {
+      if (scope.value === v) return;
+      scope.value = v;
+      try { localStorage.setItem("ta.screenScope", v); } catch (e) { /* not kept: fine */ }
+      await loadBoard();
+    }
     onMounted(loadBoard);
     const o = computed(() => data.value && data.value.overall);
     // A decision settles once its holding window has traded: about holding_days trading days later.
@@ -1346,7 +1359,7 @@ const ScoreView = {
       } catch (e) { fail(e); } finally { trackBusy.value = null; }
     }
     return { data, error, o, firstSettle, right, signed, pct, tone, ratingName, when, opened, toggle, mmdd, jobNo, specBrief, loadBoard,
-             strategies, jobsOf, setTrack, trackBusy };
+             strategies, jobsOf, setTrack, trackBusy, scope, setScope };
   },
   template: `<div class="page">
     <div class="page-head"><div><h1>成绩单</h1><p>分析决策和选股策略的事后表现，都与同市场基准相比。所有账户共用同一份记录。</p></div></div>
@@ -1396,9 +1409,18 @@ const ScoreView = {
               <td class="r">{{ right(r) }}</td><td class="num muted when">{{ r.resolved || '—' }}</td></tr></tbody></table></div></section>
       </template>
 
-      <section class="section" v-if="data.screens"><h2>选股策略成绩</h2>
-        <p class="muted small" style="margin-bottom:10px">每次选股记下前 10 名，5 个和 20 个交易日后对比沪深300（从选股当天收盘价算起）。每个交易日 17:40 自动更新。</p>
-        <div v-if="!strategies.length" class="panel board-empty"><p>还没有记录。到"选股"页跑一次，前 10 名会从当天开始计时。</p></div>
+      <section class="section" v-if="data.screens">
+        <div class="row" style="justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><h2 style="margin:0">选股策略成绩</h2>
+          <div class="chips" role="group" aria-label="看谁的选股">
+            <button type="button" class="chip" :class="scope === 'all' && 'on'" :aria-pressed="scope === 'all'" @click="setScope('all')">全部</button>
+            <button type="button" class="chip" :class="scope === 'mine' && 'on'" :aria-pressed="scope === 'mine'" @click="setScope('mine')">只看我的</button>
+          </div></div>
+        <p class="muted small" style="margin:8px 0 10px">每次选股记下前 10 名，5 个和 20 个交易日后对比沪深300（从选股当天收盘价算起）。每个交易日 17:40 自动更新。
+          <template v-if="scope === 'all'">“全部”包含所有账户计入成绩单的选股；别人的选股只显示编号、日期、策略和结果，不显示描述和筛选条件。</template>
+          <template v-else>“只看我的”下，所有数字都只按你自己的选股计算。</template></p>
+        <div v-if="!strategies.length" class="panel board-empty">
+          <p v-if="scope === 'mine' && data.screens.all_picks">你还没有计入成绩单的选股。切到“全部”可以看所有账户的选股成绩。</p>
+          <p v-else>还没有记录。到"选股"页跑一次，前 10 名会从当天开始计时。</p></div>
         <div v-else class="panel table-wrap"><table class="t">
           <thead><tr><th>策略</th><th class="r sm-hide">记录</th><th class="r sm-hide">5 日已检验</th><th class="r">5 日平均超额</th><th class="r sm-hide">5 日跑赢指数</th>
             <th class="r sm-hide">20 日已检验</th><th class="r">20 日平均超额</th><th class="r sm-hide">20 日跑赢指数</th></tr></thead>
@@ -1419,7 +1441,7 @@ const ScoreView = {
                   <span class="sj-date num muted small">{{ d.as_of }}</span>
                   <span class="sj-what">
                     <span v-if="d.request" class="sj-req">“{{ d.request }}”</span>
-                    <span class="muted small sj-cond" :title="specBrief(d.spec)">{{ specBrief(d.spec) || d.label }}</span>
+                    <span class="muted small sj-cond" :title="specBrief(d.spec)">{{ specBrief(d.spec) || d.label }}<template v-if="d.job && !d.mine && !d.removed">（其他账户）</template></span>
                   </span>
                   <span class="sj-fig small">
                     <span v-if="d.removed" class="tag plain">已移出</span>

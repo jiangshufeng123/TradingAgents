@@ -35,11 +35,26 @@ def test_a_test_saves_cli_selections_to_its_own_directory(tmp_path):
 @pytest.mark.unit
 def test_yfinance_keeps_its_cache_out_of_the_users_home():
     """yfinance caches each symbol's time zone on disk, in the home directory by default."""
+    import tempfile
     from pathlib import Path
 
     from yfinance.cache import _TzDBManager
 
-    assert not Path(_TzDBManager.get_location()).is_relative_to(Path.home())
+    # The suite's own directory, in the temp directory (which on Windows is itself
+    # inside the home directory: AppData\Local\Temp).
+    location = Path(_TzDBManager.get_location())
+    assert location.is_relative_to(Path(tempfile.gettempdir()))
+    assert location.name.startswith("tradingagents-tests-yf-")
+
+
+@pytest.mark.unit
+def test_a_test_can_still_use_loopback():
+    """Loopback never leaves the machine; on Windows socket.socketpair() (asyncio's
+    event loop, and so every TestClient) connects two sockets over 127.0.0.1."""
+    a, b = socket.socketpair()
+    with a, b:
+        a.sendall(b"ok")
+        assert b.recv(2) == b"ok"
 
 
 @pytest.mark.unit

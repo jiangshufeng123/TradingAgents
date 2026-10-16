@@ -65,8 +65,26 @@ def _no_network(request, monkeypatch):
     def refuse(*args, **kwargs):
         raise OSError(f"test tried to reach the network: {args[1:] or kwargs}")
 
-    monkeypatch.setattr(socket.socket, "connect", refuse)
-    monkeypatch.setattr(socket.socket, "connect_ex", refuse)
+    # Loopback never leaves the machine, and Windows needs it: there
+    # socket.socketpair() (asyncio's event loop, so every TestClient) is two
+    # sockets connected over 127.0.0.1.
+    real_connect, real_connect_ex = socket.socket.connect, socket.socket.connect_ex
+
+    def loopback(address) -> bool:
+        return isinstance(address, tuple) and bool(address) and address[0] in ("127.0.0.1", "::1")
+
+    def connect(self, address, *args, **kwargs):
+        if loopback(address):
+            return real_connect(self, address, *args, **kwargs)
+        return refuse(self, address, *args, **kwargs)
+
+    def connect_ex(self, address, *args, **kwargs):
+        if loopback(address):
+            return real_connect_ex(self, address, *args, **kwargs)
+        return refuse(self, address, *args, **kwargs)
+
+    monkeypatch.setattr(socket.socket, "connect", connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
     monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: refuse(None, *a))
     # yfinance's HTTP client is libcurl, which never touches Python's sockets.
     from curl_cffi import requests as curl_requests

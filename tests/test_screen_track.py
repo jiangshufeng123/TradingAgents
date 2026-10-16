@@ -173,14 +173,23 @@ def test_each_screen_keeps_its_own_list_and_the_strategy_counts_a_stock_once_a_d
         s.flush()
         ids = (a.id, b.id, a.serial, b.serial)
         row = screen_track.summary(s, user_id=1)["strategies"][0]
+        theirs = screen_track.summary(s, user_id=2)["strategies"][0]["jobs"][0]   # the same screen, seen by its owner
+        own = screen_track.summary(s, user_id=1, only_mine=True)
     assert row["picks"] == 3 and row["checked_5"] == 3 and row["screens"] == 2   # B.SS counted once
     assert row["excess_5"] == pytest.approx(0.05 / 3)
     newest, older = row["jobs"]
     assert (newest["job"], newest["serial"], newest["mine"]) == (ids[1], ids[3], False)
     assert (older["job"], older["serial"], older["mine"]) == (ids[0], ids[2], True)
     assert [p["ticker"] for p in newest["picks"]] == ["B.SS", "C.SS"] and newest["as_of"] == "2026-10-16"
-    assert {"field": "pe", "op": "<", "value": 20} in newest["spec"]["filters"]
     assert newest["excess_5"] == pytest.approx(0.025) and newest["beat_5"] == pytest.approx(0.5)
+    # another account's screen: its results, not its description or conditions
+    assert newest["spec"] is None and newest["request"] == "" and newest["label"] == "质量成长"
+    assert theirs["mine"] and {"field": "pe", "op": "<", "value": 20} in theirs["spec"]["filters"]
+    # only my own screens: every figure from them alone
+    mine = own["strategies"][0]
+    assert own["scope"] == "mine" and own["all_picks"] == 4
+    assert [j["job"] for j in mine["jobs"]] == [ids[0]] and mine["picks"] == 2 and mine["screens"] == 1
+    assert mine["excess_5"] == pytest.approx(0.025)                            # A.SS flat, B.SS +5%
 
 
 @pytest.mark.unit

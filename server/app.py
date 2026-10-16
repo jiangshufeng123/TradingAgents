@@ -612,13 +612,14 @@ def create_app(config: dict | None = None, *, start_worker: bool = True, start_s
         return {"tickers": tickers, "runs": runs, "date": body.date}
 
     @app.get("/api/scoreboard")
-    def scoreboard_get(user: User = Depends(current_user)):
-        """How the settled decisions have done (shared by all accounts, like the memory log)."""
+    def scoreboard_get(screens: str = "all", user: User = Depends(current_user)):
+        """How the settled decisions have done (shared by all accounts, like the memory log).
+        ``screens=mine`` works the screen strategies' figures out from the user's own screens."""
         from server.services import scoreboard as scoreboard_svc, screen_track
 
         out = scoreboard_svc.payload(config)
         with db.session() as s:
-            out["screens"] = screen_track.summary(s, user.id)
+            out["screens"] = screen_track.summary(s, user.id, only_mine=screens == "mine")
         return out
 
     # --- the service's scheduled jobs (scoreboard page) -----------------------------

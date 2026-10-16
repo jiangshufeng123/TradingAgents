@@ -281,7 +281,7 @@ def test_job_log_and_report_routes(app, env, tmp_path):
     with db.session() as s:
         job = jobs.create(s, 1, "analysis", {"tickers": ["NVDA"]})
         log = runner.job_log(job.id)
-        log.write_text("hello\nworld\n", encoding="utf-8")
+        log.write_bytes(b"hello\nworld\n")   # bytes: write_text would make the newlines CRLF on Windows
         job.log_path = str(log)
         report = runner.reports_base(env) / "users" / "ian" / "NVDA" / "2026-10-15_1840"
         report.mkdir(parents=True)
@@ -497,7 +497,7 @@ def test_scoreboard_page_data(app, env, monkeypatch, tmp_path):
     assert out["beliefs"][0]["based_on"] == 3 and "量能" in out["beliefs"][0]["beliefs"]
     assert out["follow"]["follow"] == pytest.approx(0.04 / 3) and out["holding_days"] == 5
     assert out["screens"] == {"strategies": [], "pending": 0, "horizons": [5, 20], "benchmark": "000300.SS",
-                              "recent": []}
+                              "recent": [], "scope": "all", "all_picks": 0}
 
 
 @pytest.mark.unit
@@ -624,3 +624,10 @@ def test_page_files_are_checked_with_the_service_before_reuse(app):
     etag = client.get("/app.js").headers["etag"]
     assert client.get("/app.js", headers={"If-None-Match": etag}).status_code == 304
     assert "cache-control" not in client.get("/vendor/vue-3.5.13.global.prod.js").headers
+
+
+@pytest.mark.unit
+def test_the_scoreboard_can_show_only_my_screens(app, env):
+    ian = _client(app)
+    assert ian.get("/api/scoreboard").json()["screens"]["scope"] == "all"
+    assert ian.get("/api/scoreboard?screens=mine").json()["screens"]["scope"] == "mine"
