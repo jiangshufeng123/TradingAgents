@@ -229,3 +229,5 @@ logs/
 portfolio.json
 # Tickers you picked into the watchlist
 watchlist.txt
+# Personal notes for Claude
+CLAUDE.local.md
