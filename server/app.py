@@ -80,6 +80,10 @@ class PickIn(BaseModel):
     rows: list[int] = Field(..., description="Row numbers in the screen's result, from 1")
 
 
+class TaskSwitchIn(BaseModel):
+    enabled: bool
+
+
 class TrackIn(BaseModel):
     track: bool = Field(..., description="Whether the screen's top picks count on the scoreboard")
 
@@ -188,6 +192,9 @@ def create_app(config: dict | None = None, *, start_worker: bool = True, start_s
         with db.session() as s:
             auth.purge_expired(s)
             canonicalize_stored(s)
+            from server.services import system_tasks
+
+            system_tasks.close_interrupted(s)
         if start_worker:
             from server.worker import Worker
 
@@ -613,6 +620,42 @@ def create_app(config: dict | None = None, *, start_worker: bool = True, start_s
         with db.session() as s:
             out["screens"] = screen_track.summary(s, user.id)
         return out
+
+    # --- the service's scheduled jobs (scoreboard page) -----------------------------
+
+    @app.get("/api/system-tasks")
+    def system_tasks_list(user: User = Depends(current_user)):
+        """The scheduled jobs that keep the scoreboard current, with their latest runs."""
+        from server.services import system_tasks
+
+        with db.session() as s:
+            return {"tasks": system_tasks.status(s), "scheduler": bool(state["scheduler"]),
+                    "can_manage": user.role == "admin"}
+
+    @app.post("/api/system-tasks/{name}")
+    def system_task_switch(name: str, body: TaskSwitchIn, user: User = Depends(admin_user)):
+        """Switch a job on or off (admins: it changes what every account's scoreboard shows)."""
+        from server.services import system_tasks
+
+        if name not in system_tasks.TASKS:
+            raise HTTPException(404, "no such task")
+        with db.session() as s:
+            system_tasks.set_enabled(s, name, body.enabled, user.username)
+        return {"name": name, "enabled": body.enabled}
+
+    @app.post("/api/system-tasks/{name}/run", status_code=202)
+    def system_task_run(name: str, user: User = Depends(current_user)):
+        """Run a job once now, in the background (whether or not it is switched on). Any account
+        may: a run only does what is already due, so running it again does no more and costs
+        nothing more; who started it is recorded."""
+        from server.services import system_tasks
+
+        if name not in system_tasks.TASKS:
+            raise HTTPException(404, "no such task")
+        work = system_tasks.WORK[name]
+        if not system_tasks.start_now(name, lambda: work(config), by=user.username):
+            raise HTTPException(409, "already running")
+        return {"name": name, "started": True}
 
     @app.get("/api/analyses/defaults")
     def analysis_defaults(user: User = Depends(current_user)):

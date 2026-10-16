@@ -99,17 +99,22 @@ class DailyScheduler:
     @staticmethod
     def _screen_check() -> None:
         """After the close: the returns of screened picks old enough (services/screen_track.py)."""
-        from server.services import screen_track
-        from tradingagents import screener
+        from server.services import system_tasks
         from tradingagents.default_config import DEFAULT_CONFIG
 
-        try:
-            with db.session() as s:
-                n = screen_track.check(s, screener.price_loader(DEFAULT_CONFIG))
-            if n:
-                logger.info("screen check: returns filled for %d pick(s)", n)
-        except Exception as exc:
-            logger.warning("screen check skipped: %s", exc)
+        done = system_tasks.scheduled("screen-check", lambda: system_tasks.screen_check(DEFAULT_CONFIG))
+        if done is not None:
+            logger.info("screen check: %s", done.summary)
+
+    @staticmethod
+    def _settle() -> None:
+        """After the close: settle the analysis decisions whose holding window has traded."""
+        from server.services import system_tasks
+        from tradingagents.default_config import DEFAULT_CONFIG
+
+        done = system_tasks.scheduled("settle", lambda: system_tasks.settle(DEFAULT_CONFIG))
+        if done is not None:
+            logger.info("settlement: %s", done.summary)
 
     def stop(self) -> None:
         if self.scheduler.running:
@@ -126,6 +131,9 @@ class DailyScheduler:
                                                                timezone=self.timezone),
                                id="screen-check", replace_existing=True, misfire_grace_time=12 * 3600,
                                coalesce=True)
+        self.scheduler.add_job(self._settle, CronTrigger(day_of_week="mon-fri", hour=17, minute=45,
+                                                         timezone=self.timezone),
+                               id="settle", replace_existing=True, misfire_grace_time=12 * 3600, coalesce=True)
         with db.session() as s:
             rows = list(s.execute(select(Schedule, User).join(User, User.id == Schedule.user_id)
                                   .where(Schedule.enabled.is_(True), User.is_active.is_(True))))

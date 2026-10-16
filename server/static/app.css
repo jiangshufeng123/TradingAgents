@@ -432,7 +432,6 @@ details > summary { cursor: pointer; color: var(--action); }
 .sj-what { flex: 1 1 260px; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .sj-cond { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .screen-job.open .sj-cond { white-space: normal; }
-.sj-fig { white-space: nowrap; }
 .screen-job-body { padding: 0 12px 12px; }
 .sj-meta { margin: 0 0 8px; display: flex; flex-wrap: wrap; gap: 4px 12px; }
 .sj-meta a { padding: 0; }
@@ -449,3 +448,23 @@ details > summary { cursor: pointer; color: var(--action); }
 @media (max-width: 640px) { div.sm-only.hist-sub { display: flex; align-items: center; gap: 8px; margin-top: 4px; } }
 .pager { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 10px; }
 .switch-label { display: inline-flex; align-items: center; gap: 8px; color: var(--ink-2); cursor: default; }
+
+/* scoreboard: the scheduled jobs that keep it current */
+.tasks { display: grid; grid-template-columns: 1fr; gap: 12px; }
+.task { padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.task .t.sub td:last-child { white-space: normal; min-width: 220px; }
+.task-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; flex-wrap: wrap; }
+.task-head h3 { margin: 0 0 2px; }
+.task-about { margin: 0; }
+.task-last { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
+.task-sum { flex-basis: 100%; }
+.task details summary { margin-top: 2px; }
+.sj-fig { white-space: normal; display: flex; flex-wrap: wrap; gap: 2px 14px; align-items: center; }
+.sj-h { white-space: nowrap; }
+.screen-job.removed { opacity: .62; border-style: dashed; }
+.sj-removed { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 0 12px 10px 30px; }
+.sj-meta .sj-out { margin-left: auto; padding: 3px 10px; font-size: 12.5px; }
+@media (max-width: 640px) {
+  .sj-cond, .sj-h { white-space: normal; }
+  .sj-removed { padding-left: 12px; }
+}

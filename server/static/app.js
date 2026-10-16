@@ -1221,11 +1221,91 @@ const RatingBars = {
   </div>`,
 };
 
+// The service's scheduled jobs that keep the scoreboard current (services/system_tasks.py):
+// a switch and "立即运行" for admins, and each job's latest runs for everyone.
+const RUN_STATUS = { running: "运行中", done: "已完成", failed: "失败" };
+const TasksPanel = {
+  emits: ["changed"],
+  setup(props, { emit }) {
+    const tasks = ref([]), canManage = ref(false), scheduler = ref(true), busy = ref(""), shown = ref({});
+    let timer = null;
+    const hhmm = s => s ? s.slice(5, 16).replace("T", " ") : "—";
+    const took = sec => sec == null ? "" : sec < 60 ? `${Math.round(sec)} 秒` : `${Math.round(sec / 60)} 分钟`;
+    const how = r => r.trigger === "manual" ? `手动${r.detail && r.detail.by ? "（" + r.detail.by + "）" : ""}` : "定时";
+    async function load() {
+      try {
+        const r = await api("/system-tasks");
+        const wasRunning = tasks.value.some(t => t.running);
+        tasks.value = r.tasks; canManage.value = r.can_manage; scheduler.value = r.scheduler;
+        const running = r.tasks.some(t => t.running || (t.runs[0] && t.runs[0].status === "running"));
+        clearTimeout(timer);
+        if (running) timer = setTimeout(load, 3000);
+        else if (wasRunning) emit("changed");             // a run just finished: the scoreboard changed
+      } catch (e) { fail(e); }
+    }
+    async function setOn(t) {
+      busy.value = t.name;
+      try {
+        await api(`/system-tasks/${t.name}`, { method: "POST", body: { enabled: !t.enabled } });
+        t.enabled = !t.enabled;
+        toast(`${t.title}${t.enabled ? "已开启，" + t.schedule + "自动运行" : "已关闭，不再定时运行"}`);
+      } catch (e) { fail(e); } finally { busy.value = ""; }
+    }
+    async function runNow(t) {
+      busy.value = t.name;
+      try { await api(`/system-tasks/${t.name}/run`, { method: "POST" }); toast(`${t.title}开始运行`); await load(); }
+      catch (e) { fail(e); } finally { busy.value = ""; }
+    }
+    onMounted(load);
+    onUnmounted(() => clearTimeout(timer));
+    return { tasks, canManage, scheduler, busy, shown, hhmm, took, how, setOn, runNow, RUN_STATUS };
+  },
+  template: `<section class="section"><h2>自动更新</h2>
+    <p class="muted small" style="margin-bottom:10px">成绩单靠这两个定时任务更新，所有账户共用。开关影响所有人，<template v-if="canManage">只有管理员能切换</template><template v-else>由管理员设置</template>；“立即运行”谁都能用，它只处理已经到期的，重复运行不会多花钱。决策结算的模型费用记在系统管理员名下。</p>
+    <div v-if="!scheduler" class="note">这个服务启动时没有开定时任务，开关打开也不会按时运行；“立即运行”仍然可用。</div>
+    <div class="tasks">
+      <div v-for="t in tasks" :key="t.name" class="panel task">
+        <div class="task-head">
+          <div><h3>{{ t.title }}</h3><span class="muted small">{{ t.schedule }}</span></div>
+          <div class="row" style="gap:10px">
+            <label class="switch-label small">{{ t.enabled ? '已开启' : '已关闭' }}
+              <button type="button" role="switch" class="switch" :aria-checked="t.enabled" :aria-label="t.title + ' 定时运行'"
+                :disabled="!canManage || busy === t.name" :title="canManage ? '' : '只有管理员能切换'" @click="setOn(t)"><span></span></button></label>
+            <button class="btn" :disabled="busy === t.name || t.running" @click="runNow(t)">{{ t.running ? '运行中…' : '立即运行' }}</button>
+          </div>
+        </div>
+        <p class="muted small task-about">{{ t.about }}</p>
+        <div class="task-last small" v-if="t.runs.length">
+          <span class="tag" :class="t.runs[0].status">{{ RUN_STATUS[t.runs[0].status] || t.runs[0].status }}</span>
+          <span class="num">{{ hhmm(t.runs[0].started_at) }} 开始<template v-if="t.runs[0].finished_at">，{{ hhmm(t.runs[0].finished_at).slice(6) }} 结束<span class="muted">（{{ took(t.runs[0].seconds) }}）</span></template></span>
+          <span class="muted">{{ how(t.runs[0]) }}</span>
+          <span class="task-sum">{{ t.runs[0].summary }}</span>
+        </div>
+        <p v-else class="muted small">还没有运行记录。</p>
+        <details v-if="t.runs.length > 1 || (t.runs[0] && t.runs[0].detail)" :open="shown[t.name]" @toggle="shown[t.name] = $event.target.open">
+          <summary class="small">最近 {{ t.runs.length }} 次运行</summary>
+          <div class="table-wrap"><table class="t sub" style="margin-top:8px">
+            <thead><tr><th>开始</th><th>结束</th><th class="sm-hide">用时</th><th class="sm-hide">方式</th><th>结果</th><th>说明</th></tr></thead>
+            <tbody><tr v-for="r in t.runs" :key="r.id">
+              <td class="num nowrap">{{ hhmm(r.started_at) }}</td><td class="num nowrap">{{ r.finished_at ? hhmm(r.finished_at) : '—' }}</td>
+              <td class="num sm-hide nowrap">{{ took(r.seconds) }}</td><td class="sm-hide">{{ how(r) }}</td>
+              <td><span class="tag" :class="r.status">{{ RUN_STATUS[r.status] || r.status }}</span></td>
+              <td class="small">{{ r.summary }}
+                <div v-if="r.detail && r.detail.settled && r.detail.settled.length" class="muted">结算：<template v-for="(x, i) in r.detail.settled" :key="x.ticker + x.date"><template v-if="i">、</template><Tk :t="x.ticker"/>（{{ x.date.slice(5) }}）</template></div>
+                <div v-if="r.detail && r.detail.failed && r.detail.failed.length" class="muted">没结算成：<template v-for="(x, i) in r.detail.failed" :key="x.ticker + x.date"><template v-if="i">、</template><span :title="x.reason"><Tk :t="x.ticker"/>（{{ x.date.slice(5) }}）</span></template></div>
+              </td></tr></tbody></table></div>
+        </details>
+      </div>
+    </div>
+  </section>`,
+};
+
 const ScoreView = {
-  components: { Seal, RatingBars },
+  components: { Seal, RatingBars, TasksPanel },
   setup() {
     const data = ref(null), error = ref("");
-    onMounted(async () => { try { data.value = await api("/scoreboard"); } catch (e) { error.value = e.message; } });
+    async function loadBoard() { try { data.value = await api("/scoreboard"); } catch (e) { error.value = e.message; } }
+    onMounted(loadBoard);
     const o = computed(() => data.value && data.value.overall);
     // A decision settles once its holding window has traded: about holding_days trading days later.
     const firstSettle = computed(() => {
@@ -1239,17 +1319,45 @@ const ScoreView = {
     const opened = ref({});
     const toggle = k => { opened.value = { ...opened.value, [k]: !opened.value[k] }; };
     const mmdd = d => d ? d.slice(5).replace("-", "月") + "日" : "";
-    return { data, error, o, firstSettle, right, signed, pct, tone, ratingName, when, opened, toggle, mmdd, jobNo, specBrief };
+    // A screen taken off the scoreboard here stays in place, greyed, until the page is left:
+    // so it can be put back at once (afterwards, from the screen page's list).
+    const removed = ref({}), trackBusy = ref(null);
+    const strategies = computed(() => {
+      const list = data.value && data.value.screens ? [...data.value.screens.strategies] : [];
+      for (const x of Object.values(removed.value))
+        if (!list.some(r => r.strategy === x.strategy))
+          list.push({ strategy: x.strategy, name: x.name, picks: 0, checked_5: 0, checked_20: 0, jobs: [],
+                      first: x.item.as_of, last: x.item.as_of, excess_5: null, excess_20: null, beat_5: null, beat_20: null });
+      return list;
+    });
+    const jobsOf = r => [...(r.jobs || []), ...Object.values(removed.value)
+      .filter(x => x.strategy === r.strategy && !(r.jobs || []).some(j => j.job === x.item.job)).map(x => x.item)]
+      .sort((a, b) => (b.as_of || "").localeCompare(a.as_of || "") || (b.job || 0) - (a.job || 0));
+    async function setTrack(d, r, on) {
+      trackBusy.value = d.job;
+      try {
+        await api(`/screens/${d.job}/track`, { method: "POST", body: { track: on } });
+        const next = { ...removed.value };
+        if (on) delete next[d.job];
+        else next[d.job] = { strategy: r.strategy, name: r.name, item: { ...d, removed: true } };
+        removed.value = next;
+        await loadBoard();
+        toast(on ? `${jobNo({ id: d.job, serial: d.serial })} 已放回成绩单` : `${jobNo({ id: d.job, serial: d.serial })} 已移出成绩单，策略成绩已重算`);
+      } catch (e) { fail(e); } finally { trackBusy.value = null; }
+    }
+    return { data, error, o, firstSettle, right, signed, pct, tone, ratingName, when, opened, toggle, mmdd, jobNo, specBrief, loadBoard,
+             strategies, jobsOf, setTrack, trackBusy };
   },
   template: `<div class="page">
     <div class="page-head"><div><h1>成绩单</h1><p>分析决策和选股策略的事后表现，都与同市场基准相比。所有账户共用同一份记录。</p></div></div>
+    <TasksPanel @changed="loadBoard"/>
     <div v-if="error" class="note err">{{ error }}</div>
     <template v-else-if="data">
       <div v-if="!o" class="panel board-empty">
         <p style="font-size:16px;color:var(--ink)">还没有结算的决策</p>
         <p class="small" style="margin-top:6px">每个决策要等持有期（{{ data.holding_days }} 个交易日）走完才能评分。
           <template v-if="data.pending.length">现在有 <b class="num">{{ data.pending.length }}</b> 个在等，第一批大约 {{ firstSettle }} 后可以结算。</template>
-          之后每次运行分析时会自动结算，不用另外操作。</p>
+          到期后由上面的“决策结算”每个交易日 17:45 自动结算，运行分析时也会顺带结算。</p>
       </div>
       <template v-else>
         <div class="kpis">
@@ -1290,11 +1398,11 @@ const ScoreView = {
 
       <section class="section" v-if="data.screens"><h2>选股策略成绩</h2>
         <p class="muted small" style="margin-bottom:10px">每次选股记下前 10 名，5 个和 20 个交易日后对比沪深300（从选股当天收盘价算起）。每个交易日 17:40 自动更新。</p>
-        <div v-if="!data.screens.strategies.length" class="panel board-empty"><p>还没有记录。到"选股"页跑一次，前 10 名会从当天开始计时。</p></div>
+        <div v-if="!strategies.length" class="panel board-empty"><p>还没有记录。到"选股"页跑一次，前 10 名会从当天开始计时。</p></div>
         <div v-else class="panel table-wrap"><table class="t">
           <thead><tr><th>策略</th><th class="r sm-hide">记录</th><th class="r sm-hide">5 日已检验</th><th class="r">5 日平均超额</th><th class="r sm-hide">5 日跑赢指数</th>
             <th class="r sm-hide">20 日已检验</th><th class="r">20 日平均超额</th><th class="r sm-hide">20 日跑赢指数</th></tr></thead>
-          <tbody><template v-for="r in data.screens.strategies" :key="r.strategy">
+          <tbody><template v-for="r in strategies" :key="r.strategy">
             <tr class="strat-row" :class="{ open: opened[r.strategy] }" @click="toggle(r.strategy)">
               <td><button type="button" class="disclose" :aria-expanded="!!opened[r.strategy]" :aria-controls="'strat-' + r.strategy" @click.stop="toggle(r.strategy)">{{ r.name }}</button>
                 <div class="muted small num"><span class="nowrap">{{ r.first }}</span><template v-if="r.last !== r.first"> 至 <span class="nowrap">{{ r.last }}</span></template><span class="sm-only">，{{ r.picks }} 只</span></div></td>
@@ -1303,7 +1411,7 @@ const ScoreView = {
               <td class="r num sm-hide">{{ r.checked_20 }}</td><td class="r num" :class="tone(r.excess_20)">{{ signed(r.excess_20) }}<div class="sm-only muted small">跑赢 {{ r.beat_20 == null ? '—' : pct(r.beat_20, 0) }}</div></td><td class="r num sm-hide">{{ r.beat_20 == null ? '—' : pct(r.beat_20, 0) }}</td>
             </tr>
             <tr v-if="opened[r.strategy]" class="strat-detail" :id="'strat-' + r.strategy"><td colspan="8">
-              <div v-for="d in r.jobs" :key="d.job || d.as_of" class="screen-job" :class="{ open: opened[r.strategy + ':' + (d.job || d.as_of)] }">
+              <div v-for="d in jobsOf(r)" :key="d.job || d.as_of" class="screen-job" :class="{ open: opened[r.strategy + ':' + (d.job || d.as_of)], removed: d.removed }">
                 <button type="button" class="screen-job-head" :aria-expanded="!!opened[r.strategy + ':' + (d.job || d.as_of)]"
                   @click="toggle(r.strategy + ':' + (d.job || d.as_of))">
                   <span class="disclose-mark" aria-hidden="true"></span>
@@ -1313,18 +1421,26 @@ const ScoreView = {
                     <span v-if="d.request" class="sj-req">“{{ d.request }}”</span>
                     <span class="muted small sj-cond" :title="specBrief(d.spec)">{{ specBrief(d.spec) || d.label }}</span>
                   </span>
-                  <span class="sj-fig small"><span class="muted">{{ d.picks.length }} 只</span>
-                    <template v-if="d.checked_5"> · 5 日超额 <b class="num" :class="tone(d.excess_5)">{{ signed(d.excess_5) }}</b></template>
-                    <template v-else> · <span class="muted">约 {{ mmdd(d.check_from) }}后检验</span></template>
-                    <template v-if="d.checked_20"> · 20 日超额 <b class="num" :class="tone(d.excess_20)">{{ signed(d.excess_20) }}</b></template>
+                  <span class="sj-fig small">
+                    <span v-if="d.removed" class="tag plain">已移出</span>
+                    <span class="sj-h"><span class="muted">5 日</span>
+                      <template v-if="d.checked_5">已检验 <span class="num">{{ d.checked_5 }}/{{ d.picks.length }}</span>，平均超额 <b class="num" :class="tone(d.excess_5)">{{ signed(d.excess_5) }}</b>，跑赢 <span class="num">{{ pct(d.beat_5, 0) }}</span></template>
+                      <template v-else>已检验 <span class="num">0/{{ d.picks.length }}</span><span class="muted">，约 {{ mmdd(d.check_from) }}后检验</span></template></span>
+                    <span class="sj-h"><span class="muted">20 日</span>
+                      <template v-if="d.checked_20">已检验 <span class="num">{{ d.checked_20 }}/{{ d.picks.length }}</span>，平均超额 <b class="num" :class="tone(d.excess_20)">{{ signed(d.excess_20) }}</b>，跑赢 <span class="num">{{ pct(d.beat_20, 0) }}</span></template>
+                      <template v-else>已检验 <span class="num">0/{{ d.picks.length }}</span></template></span>
                   </span>
                 </button>
+                <div v-if="d.removed" class="sj-removed small">已从成绩单移出，策略成绩不再计入这次选股。
+                  <button class="btn" :disabled="trackBusy === d.job" @click="setTrack(d, r, true)">恢复</button>
+                  <span class="muted">离开这个页面后，可到“选股”页的列表里重新打开。</span></div>
                 <div v-if="opened[r.strategy + ':' + (d.job || d.as_of)]" class="screen-job-body">
                   <p class="small sj-meta">
                     <template v-if="d.checked_5">5 日：平均涨跌 <b class="num" :class="tone(d.ret_5)">{{ signed(d.ret_5) }}</b>，同期指数 {{ signed(d.bench_5) }}，跑赢 {{ pct(d.beat_5, 0) }}。</template>
                     <template v-if="d.checked_20">20 日：平均涨跌 <b class="num" :class="tone(d.ret_20)">{{ signed(d.ret_20) }}</b>，同期指数 {{ signed(d.bench_20) }}，跑赢 {{ pct(d.beat_20, 0) }}。</template>
                     <a v-if="d.mine" :href="'#/screen/' + d.job">打开这次选股</a>
-                    <span v-else-if="d.job" class="muted">其他账户的选股</span>
+                    <button v-if="d.mine && !d.removed" class="btn sj-out" :disabled="trackBusy === d.job" @click="setTrack(d, r, false)">移出成绩单</button>
+                    <span v-else-if="d.job && !d.mine" class="muted">其他账户的选股（只有发起人能移出）</span>
                   </p>
                   <table class="t sub">
                     <thead><tr><th class="r">名次</th><th>股票</th><th class="r sm-hide">综合分</th><th class="r sm-hide">5 日涨跌</th><th class="r">5 日超额</th><th class="r sm-hide">20 日涨跌</th><th class="r">20 日超额</th></tr></thead>
@@ -1346,6 +1462,7 @@ const ScoreView = {
       </section>
 
       <section class="section" v-if="data.pending.length"><h2>等待结算 <span class="muted num" style="font-weight:400">{{ data.pending.length }}</span></h2>
+        <p class="muted small" style="margin-bottom:10px">每个决策从分析当天收盘起，等股票走完 {{ data.holding_days }} 个交易日再计算涨跌和超额收益。到期后由上面的“决策结算”自动结算，运行分析时也会顺带结算。</p>
         <div class="panel table-wrap"><table class="t"><thead><tr><th>决策日</th><th>股票</th><th>评级</th></tr></thead>
           <tbody><tr v-for="r in [...data.pending].reverse().slice(0, 30)" :key="r.date + r.ticker"><td class="num">{{ r.date }}</td><td><Tk :t="r.ticker"/></td>
             <td><span class="seal-cell"><Seal :rating="r.rating" small/>{{ ratingName(r.rating) }}</span></td></tr></tbody></table></div></section>

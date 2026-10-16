@@ -151,3 +151,26 @@ class ScreenPick(Base):
     bench_20: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
     checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class SystemTask(Base):
+    """A scheduled job of the service (services/system_tasks.py) and whether it is switched on.
+    Shared by every account: the decisions and screen picks they update are shared too."""
+    __tablename__ = "system_tasks"
+    name: Mapped[str] = mapped_column(String(32), primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    updated_by: Mapped[str] = mapped_column(String(64), default="")
+
+
+class TaskRun(Base):
+    """One run of a scheduled job: when it started and finished, how, and what it did."""
+    __tablename__ = "task_runs"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(32), index=True)
+    trigger: Mapped[str] = mapped_column(String(16), default="schedule")      # schedule | manual
+    status: Mapped[str] = mapped_column(String(16), default="running")       # running | done | failed
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    summary: Mapped[str] = mapped_column(String(500), default="")
+    detail: Mapped[dict | None] = mapped_column(JSON, nullable=True)
